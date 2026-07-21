@@ -1,17 +1,6 @@
 from __future__ import annotations
 
 
-MONK_PROFILE = """
-赤木修士過去名為赤木剛憲，曾是魔法學院學分競賽中的隊長。
-
-學生時期，他以「全學院制霸」為目標。畢業後仍放不下未完成的夢想，也放不下仍在迷路的後輩，因此一直留在學院。
-
-後來，他受到安西教練——如今的神父——引導，成為禊月堂的修士。從此，他不再只追求自己的勝利，而是以「萬年學長」的身分砥礪後輩、修正方向，把一代又一代學生帶回隊伍。
-
-「全學院制霸，不是把所有人踩在下面。是讓隊伍一起走到終點。」
-""".strip()
-
-
 BOUNDARY_REPLIES = {
     "romance": "這不在我的職務範圍內。若有遊戲或告解內容，我會照常回答。",
     "confession": "告解可以，告白不受理。請把真正想說的事講清楚。",
@@ -79,6 +68,18 @@ EMOTIONAL_DISTRESS_TERMS = (
     "崩潰",
 )
 
+GORILLA_NICKNAME_TERMS = (
+    "大猩猩",
+    "猩猩學長",
+    "猩猩修士",
+    "gorilla",
+)
+
+GORILLA_NICKNAME_REPLY = (
+    "尊重赤木學長，請不要喊他「大猩猩」。"
+    "若有教學、規則或告解內容，請直接說明。"
+)
+
 
 def boundary_reply(text: str) -> str | None:
     normalized = text.casefold().replace(" ", "")
@@ -110,3 +111,10 @@ def confession_boundary_reply(text: str) -> str | None:
 def is_emotional_distress(text: str) -> bool:
     normalized = text.casefold().replace(" ", "")
     return any(term in normalized for term in EMOTIONAL_DISTRESS_TERMS)
+
+
+def gorilla_nickname_reply(text: str) -> str | None:
+    normalized = text.casefold().replace(" ", "")
+    if any(term in normalized for term in GORILLA_NICKNAME_TERMS):
+        return GORILLA_NICKNAME_REPLY
+    return None

@@ -1,20 +1,12 @@
 import unittest
 
 from persona import (
-    MONK_PROFILE,
+    GORILLA_NICKNAME_REPLY,
     boundary_reply,
     confession_boundary_reply,
+    gorilla_nickname_reply,
     is_emotional_distress,
 )
-
-
-class MonkLoreTests(unittest.TestCase):
-    def test_profile_contains_eternal_senior_lore(self) -> None:
-        self.assertIn("赤木剛憲", MONK_PROFILE)
-        self.assertIn("全學院制霸", MONK_PROFILE)
-        self.assertIn("安西教練", MONK_PROFILE)
-        self.assertIn("神父", MONK_PROFILE)
-        self.assertIn("萬年學長", MONK_PROFILE)
 
 
 class BoundaryTests(unittest.TestCase):
@@ -46,6 +38,17 @@ class BoundaryTests(unittest.TestCase):
             "「若你有真正想整理的事情，可以重新說。我會聽。」",
         )
 
+
+
+class NicknameBoundaryTests(unittest.TestCase):
+    def test_rejects_gorilla_nickname(self) -> None:
+        self.assertEqual(gorilla_nickname_reply("大猩猩修士"), GORILLA_NICKNAME_REPLY)
+
+    def test_rejects_english_gorilla_nickname(self) -> None:
+        self.assertEqual(gorilla_nickname_reply("Hey Gorilla"), GORILLA_NICKNAME_REPLY)
+
+    def test_normal_senior_title_is_allowed(self) -> None:
+        self.assertIsNone(gorilla_nickname_reply("赤木學長，請教我上課"))
 
 
 class EmotionalToneTests(unittest.TestCase):

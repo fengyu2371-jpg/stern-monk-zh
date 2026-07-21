@@ -28,9 +28,9 @@ from knowledge import (
 )
 from openai_support import reasoning_options, response_diagnostics
 from persona import (
-    MONK_PROFILE,
     boundary_reply,
     confession_boundary_reply,
+    gorilla_nickname_reply,
     is_emotional_distress,
 )
 
@@ -44,6 +44,16 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("stern-monk")
+
+
+MONK_INTRODUCTION = (
+    "赤木修士曾是四院學分競賽的隊長。學生時期，他立下了「全學院制霸」的目標，"
+    "也曾在關鍵競賽中魔力耗盡，仍堅持帶隊完成最後一輪。\n\n"
+    "畢業後，他本該離開學院，卻始終放不下未完成的目標與仍在迷路的後輩。"
+    "後來在神父的引導下，他成為修士，把那份執念轉成帶領學生的責任。\n\n"
+    "如今，他是所有學生的萬年學長：不替人逃避問題，也不在學生失敗時把人丟下。\n\n"
+    "**學院提醒：尊重赤木學長，請不要喊他「大猩猩」。**"
+)
 
 
 def load_json(filename: str) -> dict[str, Any]:
@@ -230,6 +240,20 @@ tree = client.tree
 
 
 @tree.command(
+    name="修士介紹",
+    description="查看赤木修士成為萬年學長的經歷",
+)
+async def monk_introduction(interaction: discord.Interaction) -> None:
+    await interaction.response.send_message(
+        embed=monk_embed(
+            "📜 赤木修士｜萬年學長",
+            MONK_INTRODUCTION,
+            color=0x8B6F47,
+        ),
+    )
+
+
+@tree.command(
     name="新生指南",
     description="讓修士告訴你加入學院後該先做什麼",
 )
@@ -289,6 +313,11 @@ async def ask_monk(
     interaction: discord.Interaction,
     問題: app_commands.Range[str, 2, 200],
 ) -> None:
+    nickname_reply = gorilla_nickname_reply(問題)
+    if nickname_reply is not None:
+        await interaction.response.send_message(nickname_reply, ephemeral=True)
+        return
+
     refused = boundary_reply(問題)
     if refused is not None:
         await interaction.response.send_message(refused, ephemeral=True)
@@ -332,6 +361,11 @@ async def monk_confession(
     interaction: discord.Interaction,
     內容: app_commands.Range[str, 2, 300],
 ) -> None:
+    nickname_reply = gorilla_nickname_reply(內容)
+    if nickname_reply is not None:
+        await interaction.response.send_message(nickname_reply, ephemeral=True)
+        return
+
     refused = confession_boundary_reply(內容)
     if refused is not None:
         await interaction.response.send_message(refused, ephemeral=True)
@@ -416,27 +450,13 @@ async def monk_confession(
 
 
 @tree.command(
-    name="修士介紹",
-    description="查看赤木修士與全學院制霸的來歷",
-)
-async def monk_profile(interaction: discord.Interaction) -> None:
-    await interaction.response.send_message(
-        embed=monk_embed(
-            "🏫 赤木修士｜萬年學長",
-            MONK_PROFILE,
-            color=0x8B4513,
-        ),
-    )
-
-
-@tree.command(
     name="修士狀態",
     description="確認修士是否正常運作",
 )
 async def monk_status(interaction: discord.Interaction) -> None:
     confession_ai_status = "已啟用" if SETTINGS.confession_ai_available else "未啟用"
     await interaction.response.send_message(
-        "萬年學長目前在線，教學與規則查詢可正常使用。\n\n"
+        "修士目前在線，教學與規則查詢可正常使用。\n\n"
         "AI 教學：**永久停用**\n"
         f"AI 告解：**{confession_ai_status}**\n"
         f"指定頻道：<#{SETTINGS.monk_channel_id}>",
