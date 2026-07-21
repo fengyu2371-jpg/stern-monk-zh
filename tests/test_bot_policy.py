@@ -80,6 +80,15 @@ class BotPolicyTests(unittest.TestCase):
         self.assertEqual(len(teaching_calls[0].args), 2)
         self.assertEqual(teaching_calls[0].keywords, [])
 
+    def test_monk_profile_command_is_available(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1] / "monk_bot.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('name="修士介紹"', source)
+        self.assertIn("MONK_PROFILE", source)
+        self.assertIn("帶後輩挑戰全學院制霸", source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,7 +17,11 @@ class ConfessionPromptTests(unittest.TestCase):
         self.assertIn("不得加上", CONFESSION_AI_INSTRUCTIONS)
         self.assertIn("我把朋友的飲料喝掉了", CONFESSION_AI_INSTRUCTIONS)
         self.assertIn("我的罪是愛上你", CONFESSION_AI_INSTRUCTIONS)
-        self.assertIn("隊長型修士", CONFESSION_AI_INSTRUCTIONS)
+        self.assertIn("隊長型萬年學長", CONFESSION_AI_INSTRUCTIONS)
+        self.assertIn("赤木剛憲", CONFESSION_AI_INSTRUCTIONS)
+        self.assertIn("全學院制霸", CONFESSION_AI_INSTRUCTIONS)
+        self.assertIn("安西教練", CONFESSION_AI_INSTRUCTIONS)
+        self.assertIn("不要每次硬塞", CONFESSION_AI_INSTRUCTIONS)
         self.assertIn("不必把自己說成犯了大錯", CONFESSION_AI_INSTRUCTIONS)
 
     def test_wraps_player_content_without_game_knowledge(self) -> None:

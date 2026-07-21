@@ -1,6 +1,20 @@
 import unittest
 
-from persona import boundary_reply, confession_boundary_reply, is_emotional_distress
+from persona import (
+    MONK_PROFILE,
+    boundary_reply,
+    confession_boundary_reply,
+    is_emotional_distress,
+)
+
+
+class MonkLoreTests(unittest.TestCase):
+    def test_profile_contains_eternal_senior_lore(self) -> None:
+        self.assertIn("赤木剛憲", MONK_PROFILE)
+        self.assertIn("全學院制霸", MONK_PROFILE)
+        self.assertIn("安西教練", MONK_PROFILE)
+        self.assertIn("神父", MONK_PROFILE)
+        self.assertIn("萬年學長", MONK_PROFILE)
 
 
 class BoundaryTests(unittest.TestCase):

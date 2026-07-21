@@ -27,7 +27,12 @@ from knowledge import (
     render_knowledge_answer,
 )
 from openai_support import reasoning_options, response_diagnostics
-from persona import boundary_reply, confession_boundary_reply, is_emotional_distress
+from persona import (
+    MONK_PROFILE,
+    boundary_reply,
+    confession_boundary_reply,
+    is_emotional_distress,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -208,7 +213,7 @@ class MonkClient(discord.Client):
             return
 
         await self.change_presence(
-            activity=discord.Game(name="監督學生閱讀教學"),
+            activity=discord.Game(name="帶後輩挑戰全學院制霸"),
         )
         logger.info("修士已上線：%s（%s）", self.user, self.user.id)
         logger.info(
@@ -411,13 +416,27 @@ async def monk_confession(
 
 
 @tree.command(
+    name="修士介紹",
+    description="查看赤木修士與全學院制霸的來歷",
+)
+async def monk_profile(interaction: discord.Interaction) -> None:
+    await interaction.response.send_message(
+        embed=monk_embed(
+            "🏫 赤木修士｜萬年學長",
+            MONK_PROFILE,
+            color=0x8B4513,
+        ),
+    )
+
+
+@tree.command(
     name="修士狀態",
     description="確認修士是否正常運作",
 )
 async def monk_status(interaction: discord.Interaction) -> None:
     confession_ai_status = "已啟用" if SETTINGS.confession_ai_available else "未啟用"
     await interaction.response.send_message(
-        "修士目前在線，教學與規則查詢可正常使用。\n\n"
+        "萬年學長目前在線，教學與規則查詢可正常使用。\n\n"
         "AI 教學：**永久停用**\n"
         f"AI 告解：**{confession_ai_status}**\n"
         f"指定頻道：<#{SETTINGS.monk_channel_id}>",
