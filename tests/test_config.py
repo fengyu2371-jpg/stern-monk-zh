@@ -1,0 +1,79 @@
+import unittest
+
+from config import ConfigError, Settings, is_allowed_channel
+
+
+class SettingsTests(unittest.TestCase):
+    def test_reads_railway_variables(self) -> None:
+        settings = Settings.from_mapping(
+            {
+                "MONK_TOKEN": "test-token",
+                "GUILD_ID": "123",
+                "MONK_CHANNEL_ID": "456",
+                "AI_ENABLED": "true",
+                "AI_CONFESSION_ENABLED": "true",
+                "OPENAI_API_KEY": "test-key",
+                "OPENAI_MODEL": "gpt-5-nano",
+                "AI_DAILY_LIMIT": "5",
+                "AI_MAX_OUTPUT_TOKENS": "180",
+            }
+        )
+
+        self.assertEqual(settings.guild_id, 123)
+        self.assertEqual(settings.monk_channel_id, 456)
+        self.assertTrue(settings.ai_available)
+        self.assertTrue(settings.confession_ai_available)
+        self.assertEqual(settings.ai_daily_limit, 5)
+
+    def test_ai_is_unavailable_without_api_key(self) -> None:
+        settings = Settings.from_mapping({"AI_ENABLED": "true"})
+
+        self.assertFalse(settings.ai_available)
+        self.assertFalse(settings.confession_ai_available)
+
+    def test_confession_ai_defaults_on_when_master_and_key_exist(self) -> None:
+        settings = Settings.from_mapping(
+            {"AI_ENABLED": "true", "OPENAI_API_KEY": "test-key"}
+        )
+
+        self.assertTrue(settings.confession_ai_available)
+
+    def test_master_switch_disables_confession_ai(self) -> None:
+        settings = Settings.from_mapping(
+            {
+                "AI_ENABLED": "false",
+                "AI_CONFESSION_ENABLED": "true",
+                "OPENAI_API_KEY": "test-key",
+            }
+        )
+
+        self.assertFalse(settings.confession_ai_available)
+
+    def test_rejects_invalid_boolean(self) -> None:
+        with self.assertRaises(ConfigError):
+            Settings.from_mapping({"AI_ENABLED": "maybe"})
+
+    def test_rejects_invalid_channel_id(self) -> None:
+        with self.assertRaises(ConfigError):
+            Settings.from_mapping({"MONK_CHANNEL_ID": "not-a-number"})
+
+    def test_runtime_requires_channel_id(self) -> None:
+        settings = Settings.from_mapping({"MONK_TOKEN": "test-token"})
+
+        with self.assertRaises(ConfigError):
+            settings.validate_runtime()
+
+
+class ChannelRestrictionTests(unittest.TestCase):
+    def test_allows_configured_channel(self) -> None:
+        self.assertTrue(is_allowed_channel(456, 456))
+
+    def test_rejects_other_channel(self) -> None:
+        self.assertFalse(is_allowed_channel(999, 456))
+
+    def test_rejects_when_channel_is_not_configured(self) -> None:
+        self.assertFalse(is_allowed_channel(456, None))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,7 @@
+[build]
+builder = "railpack"
+
+[deploy]
+startCommand = "python monk_bot.py"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 10
