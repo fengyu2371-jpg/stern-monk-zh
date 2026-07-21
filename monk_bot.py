@@ -258,7 +258,7 @@ async def monk_tutorial(
 
     if not isinstance(item, dict):
         await interaction.response.send_message(
-            "修士皺起眉。\n\n「這份教學不見了。去叫管理員檢查資料檔案。」",
+            "這份教學目前無法載入。請通知管理員檢查資料檔案。",
             ephemeral=True,
         )
         return
@@ -436,7 +436,7 @@ async def on_app_command_error(
         )
     elif isinstance(error, app_commands.CommandOnCooldown):
         seconds = max(1, int(error.retry_after))
-        message = f"指令冷卻中，請在 **{seconds} 秒**後再問。紀錄本也需要翻頁時間。"
+        message = f"指令冷卻中，請在 **{seconds} 秒**後再問。資料整理也需要一點時間。"
     else:
         logger.exception("斜線指令執行失敗：%s", error)
         message = "系統發生錯誤，這次不是你的操作問題。請通知管理員查看 Railway 紀錄。"

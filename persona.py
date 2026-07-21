@@ -2,10 +2,10 @@ from __future__ import annotations
 
 
 BOUNDARY_REPLIES = {
-    "romance": "這不在我的職務範圍內。遊戲問題可以繼續問。",
-    "confession": "告解可以，告白不行。",
-    "dating": "修道院不提供戀愛諮詢。",
-    "sexual": "這類內容不在修士的服務範圍。請把話題帶回遊戲或規則。",
+    "romance": "這不在我的職務範圍內。若有遊戲或告解內容，我會照常回答。",
+    "confession": "告解可以，告白不受理。請把真正想說的事講清楚。",
+    "dating": "修道院不處理交往申請。遊戲問題可以繼續問。",
+    "sexual": "這類內容不在修士的服務範圍。請把話題帶回遊戲、規則或告解。",
 }
 
 SEXUAL_TERMS = (
@@ -90,9 +90,8 @@ def confession_boundary_reply(text: str) -> str | None:
         BOUNDARY_REPLIES["dating"],
     }:
         return (
-            "「這不屬於告解，也不在我的職務範圍內。」\n\n"
-            "「修道院不處理戀愛申請。若有遊戲問題或真正想談的事情，"
-            "可以重新說明。」"
+            "「這不是告解內容，我不會接受這類邀請。」\n\n"
+            "「若你有真正想整理的事情，可以重新說。我會聽。」"
         )
     return reply
 

@@ -5,10 +5,10 @@ from persona import boundary_reply, confession_boundary_reply, is_emotional_dist
 
 class BoundaryTests(unittest.TestCase):
     def test_rejects_confession_to_monk(self) -> None:
-        self.assertEqual(boundary_reply("我想跟你告白"), "告解可以，告白不行。")
+        self.assertEqual(boundary_reply("我想跟你告白"), "告解可以，告白不受理。請把真正想說的事講清楚。")
 
     def test_rejects_dating_request(self) -> None:
-        self.assertEqual(boundary_reply("可以跟我交往嗎"), "修道院不提供戀愛諮詢。")
+        self.assertEqual(boundary_reply("可以跟我交往嗎"), "修道院不處理交往申請。遊戲問題可以繼續問。")
 
     def test_rejects_intimate_address_request(self) -> None:
         reply = boundary_reply("以後叫我寶貝")
@@ -28,10 +28,10 @@ class BoundaryTests(unittest.TestCase):
 
         self.assertEqual(
             reply,
-            "「這不屬於告解，也不在我的職務範圍內。」\n\n"
-            "「修道院不處理戀愛申請。若有遊戲問題或真正想談的事情，"
-            "可以重新說明。」",
+            "「這不是告解內容，我不會接受這類邀請。」\n\n"
+            "「若你有真正想整理的事情，可以重新說。我會聽。」",
         )
+
 
 
 class EmotionalToneTests(unittest.TestCase):
