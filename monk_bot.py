@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +97,67 @@ elif SETTINGS.ai_enabled:
 
 CONFESSION_USAGE_SCOPE = "confession_day"
 ORACLE_USAGE_SCOPE = "oracle_week"
+
+
+def monk_embed(
+    title: str,
+    description: str,
+    *,
+    color: int = 0x2B2D31,
+) -> discord.Embed:
+    return discord.Embed(
+        title=title,
+        description=description,
+        color=color,
+    )
+
+
+def knowledge_source_label(match: KnowledgeMatch) -> str:
+    source_type = "固定 FAQ" if match.kind == "faq" else "固定教學"
+    return f"知識庫來源：{source_type}｜{match.tutorial['title']}"
+
+
+def roleplay_lines(match: KnowledgeMatch) -> tuple[str, str]:
+    tutorial = match.tutorial
+    return (
+        random.choice(tutorial["monk_openings"]),
+        random.choice(tutorial["monk_endings"]),
+    )
+
+
+def render_local_reply(
+    match: KnowledgeMatch,
+    *,
+    concise: bool = False,
+    gentle: bool = False,
+) -> str:
+    answer = render_knowledge_answer(match, concise=concise)
+    source_label = f"_{knowledge_source_label(match)}_"
+    if gentle:
+        return (
+            f"{answer}\n\n"
+            "先照正確做法處理；若畫面仍不同，"
+            f"保留截圖詢問管理員。\n\n{source_label}"
+        )
+
+    opening, ending = roleplay_lines(match)
+    return (
+        f"{opening}\n\n{answer}\n\n"
+        f"{ending}\n\n{source_label}"
+    )
+
+
+def random_line(category: str, fallback: str) -> str:
+    lines = DIALOGUE.get(category, [])
+    if not isinstance(lines, list):
+        return fallback
+
+    valid_lines = [
+        line
+        for line in lines
+        if isinstance(line, str) and line.strip()
+    ]
+    return random.choice(valid_lines) if valid_lines else fallback
 
 
 async def ask_openai_confession(

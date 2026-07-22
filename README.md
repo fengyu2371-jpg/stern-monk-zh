@@ -373,3 +373,25 @@ ORACLE_WEEKLY_LIMIT=3
 - 公開主面板可以由所有玩家按下，但只會開啟按鈕操作者自己的資料。
 - 學籍、地點管理、神諭冊、刪除確認、教學等個人子頁面都綁定原操作者。
 - 其他玩家操作他人的個人頁面時，只會收到私密拒絕提示。
+
+
+## v14.1 執行修復
+
+修正 v14 在改寫告解次數計數時，誤刪以下共用函式：
+
+- `monk_embed`
+- `knowledge_source_label`
+- `roleplay_lines`
+- `render_local_reply`
+- `random_line`
+
+這會導致 `/建立修士面板` 執行時發生 `NameError`，並顯示通用錯誤訊息。
+
+同時補回 `from datetime import date`，避免入學登記頁面建立預設年份時發生錯誤。
+
+次數規則維持：
+
+```env
+AI_DAILY_LIMIT=1
+ORACLE_WEEKLY_LIMIT=3
+```

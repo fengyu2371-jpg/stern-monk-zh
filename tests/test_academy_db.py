@@ -246,5 +246,51 @@ class OracleUnlimitedMigrationTests(unittest.TestCase):
             )
 
 
+class OracleDeletionUsageTests(unittest.TestCase):
+    def test_deleting_page_does_not_refund_draw_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = AcademyDatabase(Path(temp_dir) / "monk.db")
+            db.initialize()
+            db.save_profile(
+                user_id=123,
+                student_name="學生",
+                preferred_name="學生",
+                house="星泉院",
+                major="",
+                enrollment_year="",
+                introduction="",
+                companion_name="",
+            )
+            week = month_week_info(date(2026, 7, 22))
+            db.try_reserve_usage(
+                user_id=123,
+                usage_scope="oracle_week",
+                period_key=week.key,
+                limit=3,
+            )
+            page = db.create_oracle(
+                user_id=123,
+                week=week,
+                oracle_text="測試神諭",
+                used_keywords="",
+                used_place_names="",
+            )
+
+            self.assertTrue(
+                db.delete_oracle(
+                    page_id=page["id"],
+                    user_id=123,
+                )
+            )
+            self.assertEqual(
+                db.get_usage_count(
+                    user_id=123,
+                    usage_scope="oracle_week",
+                    period_key=week.key,
+                ),
+                1,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
