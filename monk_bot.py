@@ -940,14 +940,15 @@ def student_dashboard_embed(user_id: int) -> discord.Embed:
     profile = ACADEMY_DB.get_profile_bundle(user_id)
     if profile is None:
         return monk_embed(
-            "🎓 禊月堂學生資料中心",
-            "目前尚未建立學籍。\n\n"
-            "請從修士主面板的「學生資料」完成入學登記。",
+            "🎓 禊月堂學生資料",
+            "目前尚未建立學籍。",
             color=0x5865F2,
         )
 
-    preferences = profile.get("preferences", {})
     places = ACADEMY_DB.list_user_places(user_id)
+    public_places = [
+        place for place in places if bool(place.get("is_public"))
+    ]
     pages = ACADEMY_DB.list_oracles(user_id)
     current_week = month_week_info()
     current_count = ACADEMY_DB.get_usage_count(
@@ -957,7 +958,7 @@ def student_dashboard_embed(user_id: int) -> discord.Embed:
     )
 
     embed = monk_embed(
-        "🎓 我的學生資料總覽",
+        f"🎓 學生資料｜{profile.get('preferred_name') or profile.get('student_name') or '未命名學生'}",
         f"**學生姓名**：{profile.get('student_name') or '未填寫'}\n"
         f"**希望稱呼**：{profile.get('preferred_name') or '未填寫'}\n"
         f"**所屬學院**：{profile.get('house') or '尚未分院'}\n"
@@ -967,32 +968,35 @@ def student_dashboard_embed(user_id: int) -> discord.Embed:
         color=0x5865F2,
     )
 
-    preference_lines = (
-        f"喜歡：{preferences.get('liked_themes') or '未設定'}\n"
-        f"避免：{preferences.get('avoided_topics') or '未設定'}\n"
-        f"創作關鍵字：{preferences.get('creative_keywords') or '未設定'}\n"
-        f"偏好場景：{preferences.get('preferred_scenes') or '未設定'}"
+    introduction = _truncate_text(
+        profile.get("introduction") or "尚未填寫個人簡介。",
+        1024,
     )
     embed.add_field(
-        name="🔮 神諭偏好",
-        value=_truncate_text(preference_lines, 1024),
+        name="個人簡介",
+        value=introduction,
         inline=False,
     )
     embed.add_field(
-        name="🏘️ 學院街區",
-        value=f"已登記 **{len(places)}** 個商店、住處或其他地點。",
+        name="🏘️ 公開地點",
+        value=(
+            f"公開 **{len(public_places)}** 處｜"
+            f"全部登記 **{len(places)}** 處"
+        ),
         inline=True,
     )
     embed.add_field(
         name="📖 神諭冊",
         value=(
-            f"目前共有 **{len(pages)}** 頁。\n"
-            f"本週 `{current_week.label}`：已抽 **{current_count}／"
-            f"{SETTINGS.oracle_weekly_limit}** 次"
+            f"共有 **{len(pages)}** 頁\n"
+            f"本週 `{current_week.label}` 已抽 "
+            f"**{current_count}／{SETTINGS.oracle_weekly_limit}** 次"
         ),
         inline=True,
     )
-    embed.set_footer(text="此頁為私密資料，只有按下按鈕的本人看得到。")
+    embed.set_footer(
+        text="此學籍為公開展示；修改、刪除與神諭偏好仍只有本人能操作。"
+    )
     return embed
 
 
@@ -1050,6 +1054,52 @@ def student_places_embed(user_id: int) -> discord.Embed:
     )
 
 
+def public_my_places_embed(user_id: int) -> discord.Embed:
+    profile = ACADEMY_DB.get_profile(user_id)
+    places = ACADEMY_DB.list_user_places(user_id)
+    public_places = [
+        place for place in places if bool(place.get("is_public"))
+    ]
+    private_count = len(places) - len(public_places)
+    display_name = (
+        (profile or {}).get("preferred_name")
+        or (profile or {}).get("student_name")
+        or "學生"
+    )
+
+    if public_places:
+        lines = [
+            f"**#{place['id']}｜{place['name']}**\n"
+            f"{place['place_type']}｜{place['status']}｜可進神諭"
+            for place in public_places[:12]
+        ]
+        remaining = len(public_places) - 12
+        if remaining > 0:
+            lines.append(f"……另有 {remaining} 個公開地點未顯示。")
+        public_text = "\n\n".join(lines)
+    else:
+        public_text = "目前沒有公開地點。"
+
+    embed = monk_embed(
+        f"📍 {display_name}的地點",
+        _truncate_text(public_text, 3500),
+        color=0x8B6F47,
+    )
+    embed.add_field(
+        name="地點統計",
+        value=(
+            f"公開：**{len(public_places)}** 處\n"
+            f"不公開：**{private_count}** 處\n"
+            f"合計：**{len(places)}** 處"
+        ),
+        inline=False,
+    )
+    embed.set_footer(
+        text="不公開地點的名稱不會顯示在這張公開頁面。"
+    )
+    return embed
+
+
 class StudentPrivateMenuView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
         super().__init__(owner_id, timeout=900)
@@ -1095,8 +1145,11 @@ class StudentPrivateMenuView(UserOwnedView):
         button: discord.ui.Button,
     ) -> None:
         await interaction.response.edit_message(
-            embed=student_places_embed(self.owner_id),
-            view=self,
+            embed=public_my_places_embed(self.owner_id),
+            view=MyPlacesHubView(
+                self.owner_id,
+                return_target="student",
+            ),
         )
 
     @discord.ui.button(
@@ -1162,8 +1215,7 @@ class StudentDataPanelView(discord.ui.View):
 
         await interaction.response.send_message(
             embed=student_dashboard_embed(interaction.user.id),
-            view=StudentPrivateMenuView(interaction.user.id),
-            ephemeral=True,
+            view=StudentHubView(interaction.user.id),
         )
 
 
@@ -1356,23 +1408,25 @@ class StudentHubView(UserOwnedView):
     ) -> None:
         existing = ACADEMY_DB.get_profile(self.owner_id)
         if existing is None:
-            await interaction.response.edit_message(
+            await interaction.response.send_message(
                 embed=monk_embed(
                     "🎓 入學登記",
                     "請先選擇學院與入學年份，再繼續填寫資料。",
                     color=0x5865F2,
                 ),
                 view=EnrollmentSetupView(self.owner_id),
+                ephemeral=True,
             )
             return
 
-        await interaction.response.edit_message(
+        await interaction.response.send_message(
             embed=monk_embed(
                 "✏️ 修改學籍",
                 "先確認學院與入學年份，再開啟資料表單。",
                 color=0x5865F2,
             ),
             view=EnrollmentSetupView(self.owner_id, existing),
+            ephemeral=True,
         )
 
     @discord.ui.button(
@@ -1418,13 +1472,13 @@ class StudentHubView(UserOwnedView):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        await interaction.response.edit_message(
+        await interaction.response.send_message(
             content=(
                 "這會刪除你的學籍、神諭偏好、個人地點與神諭冊。"
                 "確定要繼續嗎？"
             ),
-            embed=None,
             view=DeleteProfileView(self.owner_id),
+            ephemeral=True,
         )
 
 
@@ -1716,6 +1770,139 @@ class PlaceVisibilityPickerView(UserOwnedView):
         )
 
 
+
+
+class MyPlacesHubView(UserOwnedView):
+    def __init__(
+        self,
+        owner_id: int,
+        *,
+        return_target: str = "town",
+    ) -> None:
+        super().__init__(owner_id, timeout=900)
+        self.return_target = return_target
+        self.back_button.label = (
+            "返回學生資料"
+            if return_target == "student"
+            else "返回城下町"
+        )
+
+    @discord.ui.button(
+        label="新增地點",
+        style=discord.ButtonStyle.success,
+        emoji="➕",
+        row=0,
+    )
+    async def add_place(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=monk_embed(
+                "🏘️ 新增地點",
+                "選擇類型與來源，再決定是否公開。"
+                "所有學生地點都能成為自己的神諭素材。",
+                color=0x8B6F47,
+            ),
+            view=PlaceRegistrationOptionsView(self.owner_id),
+        )
+
+    @discord.ui.button(
+        label="公開設定",
+        style=discord.ButtonStyle.secondary,
+        emoji="👁️",
+        row=0,
+    )
+    async def visibility_settings(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        places = ACADEMY_DB.list_user_places(self.owner_id)
+        if not places:
+            await interaction.response.send_message(
+                "目前沒有可調整的地點，先按「新增地點」。",
+                ephemeral=True,
+            )
+            return
+
+        note = ""
+        if len(places) > 25:
+            note = "\n\n目前先顯示前 25 個地點。"
+
+        await interaction.response.edit_message(
+            embed=monk_embed(
+                "👁️ 地點公開設定",
+                "選擇地點後切換公開或不公開。"
+                "不公開地點仍可進自己的神諭，但不會顯示給其他玩家。"
+                + note,
+                color=0x8B6F47,
+            ),
+            view=PlaceVisibilityPickerView(self.owner_id, places),
+        )
+
+    @discord.ui.button(
+        label="查看全部（私密）",
+        style=discord.ButtonStyle.secondary,
+        emoji="🔒",
+        row=0,
+    )
+    async def view_all_private(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.send_message(
+            embed=student_places_embed(self.owner_id),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="重新整理",
+        style=discord.ButtonStyle.primary,
+        emoji="🔄",
+        row=1,
+    )
+    async def refresh_places(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=public_my_places_embed(self.owner_id),
+            view=self,
+        )
+
+    @discord.ui.button(
+        label="返回城下町",
+        style=discord.ButtonStyle.secondary,
+        emoji="↩️",
+        row=1,
+    )
+    async def back_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if self.return_target == "student":
+            await interaction.response.edit_message(
+                embed=student_dashboard_embed(self.owner_id),
+                view=StudentHubView(self.owner_id),
+            )
+            return
+
+        await interaction.response.edit_message(
+            embed=monk_embed(
+                "🏘️ 禊月堂魔法學院城下町",
+                "查看學生商店街、校外居住地，"
+                "或直接管理自己的店鋪與住所。",
+                color=0x8B6F47,
+            ),
+            view=TownHubView(self.owner_id),
+        )
+
+
 class TownHubView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
         super().__init__(owner_id, timeout=900)
@@ -1792,8 +1979,11 @@ class TownHubView(UserOwnedView):
         button: discord.ui.Button,
     ) -> None:
         await interaction.response.edit_message(
-            embed=student_places_embed(self.owner_id),
-            view=self,
+            embed=public_my_places_embed(self.owner_id),
+            view=MyPlacesHubView(
+                self.owner_id,
+                return_target="town",
+            ),
         )
 
     @discord.ui.button(
@@ -2255,7 +2445,6 @@ async def _handle_current_week_oracle(
     await interaction.followup.send(
         embed=view.current_embed(),
         view=view,
-        ephemeral=True,
     )
 
 
@@ -2346,7 +2535,6 @@ class MonkMainPanelView(discord.ui.View):
         await interaction.response.send_message(
             embed=student_dashboard_embed(interaction.user.id),
             view=StudentHubView(interaction.user.id),
-            ephemeral=True,
         )
 
     @discord.ui.button(
@@ -2369,7 +2557,6 @@ class MonkMainPanelView(discord.ui.View):
                 color=0x8B6F47,
             ),
             view=TownHubView(interaction.user.id),
-            ephemeral=True,
         )
 
     @discord.ui.button(
@@ -2391,7 +2578,6 @@ class MonkMainPanelView(discord.ui.View):
                 color=0x7A5AC8,
             ),
             view=OracleHubView(interaction.user.id),
-            ephemeral=True,
         )
 
     @discord.ui.button(
@@ -2414,7 +2600,6 @@ class MonkMainPanelView(discord.ui.View):
                 color=0x3BA55D,
             ),
             view=TeachingHubView(interaction.user.id),
-            ephemeral=True,
         )
 
     @discord.ui.button(
