@@ -223,6 +223,16 @@ class AcademyDatabase:
 
                 CREATE INDEX IF NOT EXISTS idx_usage_counters_period
                 ON usage_counters(usage_scope, period_key);
+
+                CREATE TABLE IF NOT EXISTS player_panels (
+                    user_id TEXT PRIMARY KEY,
+                    channel_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_player_panels_message
+                ON player_panels(message_id);
                 """
             )
             self._migrate_oracle_pages_for_unlimited_draws(conn)
@@ -431,6 +441,74 @@ class AcademyDatabase:
                 )
             conn.commit()
         return remaining
+
+    def save_player_panel(
+        self,
+        *,
+        user_id: int,
+        channel_id: int,
+        message_id: int,
+    ) -> None:
+        now = utc_now_iso()
+        with closing(self.connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO player_panels (
+                    user_id, channel_id, message_id, updated_at
+                )
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id)
+                DO UPDATE SET
+                    channel_id = excluded.channel_id,
+                    message_id = excluded.message_id,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    str(user_id),
+                    str(channel_id),
+                    str(message_id),
+                    now,
+                ),
+            )
+            conn.commit()
+
+    def get_player_panel(
+        self,
+        user_id: int,
+    ) -> dict[str, Any] | None:
+        with closing(self.connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM player_panels
+                WHERE user_id = ?
+                """,
+                (str(user_id),),
+            ).fetchone()
+        return self._row_dict(row)
+
+    def list_player_panels(self) -> list[dict[str, Any]]:
+        with closing(self.connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM player_panels
+                ORDER BY updated_at ASC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_player_panel(self, user_id: int) -> bool:
+        with closing(self.connect()) as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM player_panels
+                WHERE user_id = ?
+                """,
+                (str(user_id),),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
 
     def save_profile(
         self,

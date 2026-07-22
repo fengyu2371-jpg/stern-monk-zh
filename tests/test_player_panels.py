@@ -84,6 +84,10 @@ class OnePanelPerPlayerTests(unittest.TestCase):
             self.source,
         )
         self.assertIn(
+            "**經營者／居住者**",
+            self.source,
+        )
+        self.assertIn(
             "class PlacesView(UserOwnedView)",
             self.source,
         )

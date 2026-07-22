@@ -15,16 +15,18 @@ class MonkMainPanelTests(unittest.TestCase):
         self.assertIn('name="建立修士面板"', self.source)
 
     def test_main_panel_is_persistent(self) -> None:
-        self.assertIn("class MonkMainPanelView", self.source)
-        self.assertIn("super().__init__(timeout=None)", self.source)
-        for custom_id in (
-            "stern_monk:main:student",
-            "stern_monk:main:town",
-            "stern_monk:main:oracle",
-            "stern_monk:main:teaching",
-            "stern_monk:main:confession",
-        ):
-            self.assertIn(custom_id, self.source)
+        self.assertIn(
+            "class MonkMainPanelView(discord.ui.View)",
+            self.source,
+        )
+        self.assertIn(
+            "super().__init__(timeout=None)",
+            self.source,
+        )
+        self.assertIn(
+            "stern_monk:entry:player_panel",
+            self.source,
+        )
 
     def test_main_panel_is_registered_on_startup(self) -> None:
         self.assertIn(
