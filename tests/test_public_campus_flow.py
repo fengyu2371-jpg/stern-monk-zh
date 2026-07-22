@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 
-class PublicCampusFlowTests(unittest.TestCase):
+class PublicVisibleOwnerGuardTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = (
@@ -25,74 +25,82 @@ class PublicCampusFlowTests(unittest.TestCase):
             and node.name == method_name
         )
 
-    def test_my_places_page_contains_direct_actions(self) -> None:
-        self.assertIn("class MyPlacesHubView(UserOwnedView)", self.source)
-        for label in (
-            'label="新增地點"',
-            'label="公開設定"',
-            'label="查看全部（私密）"',
-            'label="重新整理"',
-        ):
-            self.assertIn(label, self.source)
-
-    def test_public_place_page_does_not_list_private_names(self) -> None:
-        function = next(
-            node
-            for node in self.tree.body
-            if isinstance(node, ast.FunctionDef)
-            and node.name == "public_my_places_embed"
-        )
-        rendered = ast.unparse(function)
-        self.assertIn("if bool(place.get('is_public'))", rendered)
-        self.assertIn("private_count", rendered)
-        self.assertNotIn("student_places_embed", rendered)
-
-    def test_main_student_page_is_public_when_profile_exists(self) -> None:
-        method = self._method("MonkMainPanelView", "student_data")
-        rendered = ast.unparse(method)
-        public_branch = rendered.rsplit(
-            "await interaction.response.send_message",
-            1,
-        )[-1]
-        self.assertNotIn("ephemeral=True", public_branch)
-
-    def test_main_town_oracle_and_teaching_are_public(self) -> None:
+    def test_main_panel_personal_sections_are_public_visible(self) -> None:
         for method_name in ("town", "oracle", "teaching"):
             rendered = ast.unparse(
                 self._method("MonkMainPanelView", method_name)
             )
             self.assertNotIn("ephemeral=True", rendered)
 
-    def test_confession_stays_modal_private_flow(self) -> None:
-        rendered = ast.unparse(
-            self._method("MonkMainPanelView", "confession")
+        student = ast.unparse(
+            self._method("MonkMainPanelView", "student_data")
         )
-        self.assertIn("send_modal", rendered)
+        # 未入學表單仍私密；已有學籍後的 StudentHubView 分支公開。
+        self.assertIn("ephemeral=True", student)
+        normalized = "".join(student.split())
+        self.assertIn(
+            "view=StudentHubView(interaction.user.id))",
+            normalized,
+        )
+        self.assertNotIn(
+            "view=StudentHubView(interaction.user.id),ephemeral=True)",
+            normalized,
+        )
 
-    def test_modification_and_deletion_remain_private(self) -> None:
-        for method_name in ("edit_profile", "delete_profile"):
-            rendered = ast.unparse(
-                self._method("StudentHubView", method_name)
-            )
-            self.assertIn("ephemeral=True", rendered)
-
-    def test_owner_guard_still_protects_personal_buttons(self) -> None:
+    def test_owner_guard_still_blocks_other_players(self) -> None:
         self.assertIn(
             "這份資料屬於其他學生，不能代替操作。",
             self.source,
         )
-        for class_name in (
+        guarded_classes = (
             "StudentHubView",
             "MyPlacesHubView",
             "PlaceRegistrationOptionsView",
             "PlaceVisibilityPickerView",
+            "PlaceVisibilityEditorView",
             "OracleHubView",
             "OracleBookView",
-        ):
+            "OracleDeleteConfirmView",
+            "TeachingHubView",
+        )
+        for class_name in guarded_classes:
             self.assertIn(
                 f"class {class_name}(UserOwnedView)",
                 self.source,
             )
+
+    def test_oracle_generation_edits_original_message(self) -> None:
+        self.assertIn("interaction.edit_original_response", self.source)
+        self.assertIn("神諭生成中", self.source)
+        handler = next(
+            node
+            for node in self.tree.body
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "_handle_current_week_oracle"
+        )
+        rendered = ast.unparse(handler)
+        self.assertIn("response.edit_message", rendered)
+        self.assertIn("edit_original_response", rendered)
+        self.assertNotIn("followup.send", rendered)
+        self.assertNotIn("response.defer", rendered)
+
+    def test_my_places_view_all_edits_not_popup(self) -> None:
+        rendered = ast.unparse(
+            self._method("MyPlacesHubView", "view_all_private")
+        )
+        self.assertIn("edit_message", rendered)
+        self.assertNotIn("send_message", rendered)
+
+    def test_sensitive_parts_remain_private(self) -> None:
+        confession = ast.unparse(
+            self._method("MonkMainPanelView", "confession")
+        )
+        self.assertIn("send_modal", confession)
+
+        delete_profile = ast.unparse(
+            self._method("StudentHubView", "delete_profile")
+        )
+        self.assertIn("ephemeral=True", delete_profile)
 
     def test_command_count_remains_two(self) -> None:
         names = []

@@ -169,6 +169,7 @@ class AcademyDatabase:
                     place_type TEXT NOT NULL,
                     district TEXT NOT NULL DEFAULT '',
                     description TEXT NOT NULL DEFAULT '',
+                    operator_name TEXT NOT NULL DEFAULT '',
                     source_kind TEXT NOT NULL DEFAULT '新登記',
                     status TEXT NOT NULL DEFAULT '使用中',
                     allow_oracle INTEGER NOT NULL DEFAULT 1,
@@ -225,6 +226,47 @@ class AcademyDatabase:
                 """
             )
             self._migrate_oracle_pages_for_unlimited_draws(conn)
+
+            place_columns = {
+                row["name"]
+                for row in conn.execute(
+                    "PRAGMA table_info(student_places)"
+                ).fetchall()
+            }
+            if "operator_name" not in place_columns:
+                conn.execute(
+                    "ALTER TABLE student_places "
+                    "ADD COLUMN operator_name TEXT NOT NULL DEFAULT ''"
+                )
+
+            # 舊地點以原登記學生的希望稱呼作為經營者／居住者。
+            conn.execute(
+                """
+                UPDATE student_places
+                SET operator_name = COALESCE(
+                    NULLIF(
+                        (
+                            SELECT preferred_name
+                            FROM student_profiles
+                            WHERE student_profiles.user_id =
+                                  student_places.user_id
+                        ),
+                        ''
+                    ),
+                    NULLIF(
+                        (
+                            SELECT student_name
+                            FROM student_profiles
+                            WHERE student_profiles.user_id =
+                                  student_places.user_id
+                        ),
+                        ''
+                    ),
+                    '未設定'
+                )
+                WHERE TRIM(operator_name) = ''
+                """
+            )
 
             # 既有神諭頁面回填成已使用抽取次數。
             # 刪除神諭頁面不會退還抽取次數，避免以刪除方式無限重抽。
@@ -522,6 +564,7 @@ class AcademyDatabase:
         place_type: str,
         district: str,
         description: str,
+        operator_name: str,
         source_kind: str,
         status: str,
         allow_oracle: bool,
@@ -533,10 +576,10 @@ class AcademyDatabase:
                 """
                 INSERT INTO student_places (
                     user_id, name, place_type, district, description,
-                    source_kind, status, allow_oracle, is_public,
-                    created_at, updated_at
+                    operator_name, source_kind, status, allow_oracle,
+                    is_public, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(user_id),
@@ -544,6 +587,7 @@ class AcademyDatabase:
                     place_type.strip(),
                     district.strip(),
                     description.strip(),
+                    operator_name.strip(),
                     source_kind.strip(),
                     status.strip(),
                     1,

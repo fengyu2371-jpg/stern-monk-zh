@@ -61,6 +61,7 @@ class AcademyDatabaseTests(unittest.TestCase):
             place_type="書店",
             district="學院城東街",
             description="夜間營業。",
+            operator_name="測試學生",
             source_kind="舊企劃遷入",
             status="營業中",
             allow_oracle=False,

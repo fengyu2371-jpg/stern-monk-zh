@@ -531,6 +531,12 @@ class PlaceModal(discord.ui.Modal, title="學院街區｜地點登記"):
         required=False,
         max_length=80,
     )
+    operator_name = discord.ui.TextInput(
+        label="店主／經營者",
+        placeholder="填寫角色名稱；共同經營可填多人",
+        required=True,
+        max_length=120,
+    )
     description = discord.ui.TextInput(
         label="地點簡介",
         style=discord.TextStyle.paragraph,
@@ -559,6 +565,29 @@ class PlaceModal(discord.ui.Modal, title="學院街區｜地點登記"):
         self.source_kind = source_kind
         self.is_public = is_public
 
+        profile = ACADEMY_DB.get_profile(self.user_id) or {}
+        self.operator_name.default = (
+            profile.get("preferred_name")
+            or profile.get("student_name")
+            or ""
+        )
+
+        if self.place_type == "校外住處":
+            self.operator_name.label = "居住者"
+            self.operator_name.placeholder = "填寫居住角色；共同居住可填多人"
+        elif self.place_type in {
+            "商店",
+            "餐館",
+            "書店",
+            "魔藥工房",
+            "診所",
+        }:
+            self.operator_name.label = "店主／經營者"
+            self.operator_name.placeholder = "填寫店主角色；共同經營可填多人"
+        else:
+            self.operator_name.label = "負責人／使用者"
+            self.operator_name.placeholder = "填寫負責角色；可填多人"
+
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if ACADEMY_DB.get_profile(self.user_id) is None:
             await interaction.response.send_message(
@@ -573,6 +602,7 @@ class PlaceModal(discord.ui.Modal, title="學院街區｜地點登記"):
             place_type=self.place_type,
             district=str(self.district.value),
             description=str(self.description.value),
+            operator_name=str(self.operator_name.value),
             source_kind=self.source_kind,
             status=str(self.status.value),
             allow_oracle=True,
@@ -584,6 +614,7 @@ class PlaceModal(discord.ui.Modal, title="學院街區｜地點登記"):
                 "🏘️ 地點登記完成",
                 f"**{self.place_name.value}** 已加入學院街區資料。\n\n"
                 f"類型：{self.place_type}\n"
+                f"店主／居住者：{self.operator_name.value}\n"
                 f"來源：{self.source_kind}\n"
                 f"公開：{'是' if self.is_public else '否'}\n"
                 f"可作神諭素材：是\n"
@@ -603,7 +634,8 @@ def place_embed(
     embed = monk_embed(
         f"🏘️ 學院街區｜{place['name']}",
         f"**類型**：{place['place_type']}\n"
-        f"**經營者／居住者**：{place.get('owner_name') or '未公開'}\n"
+        f"**經營者／居住者**："
+        f"{place.get('operator_name') or place.get('owner_name') or '未設定'}\n"
         f"**區域**：{place.get('district') or '未設定'}\n"
         f"**狀態**：{place.get('status') or '未設定'}\n"
         f"**來源**：{place.get('source_kind') or '新登記'}\n\n"
@@ -1040,7 +1072,9 @@ def student_places_embed(user_id: int) -> discord.Embed:
         lines.append(
             f"**#{place['id']}｜{place['name']}**\n"
             f"{place['place_type']}｜{place['status']}｜"
-            f"{'公開' if place['is_public'] else '不公開'}｜可進神諭"
+            f"{'公開' if place['is_public'] else '不公開'}｜可進神諭\n"
+            f"經營者／居住者："
+            f"{place.get('operator_name') or '未設定'}"
         )
 
     remaining = len(places) - 15
@@ -1070,7 +1104,9 @@ def public_my_places_embed(user_id: int) -> discord.Embed:
     if public_places:
         lines = [
             f"**#{place['id']}｜{place['name']}**\n"
-            f"{place['place_type']}｜{place['status']}｜可進神諭"
+            f"{place['place_type']}｜{place['status']}｜可進神諭\n"
+            f"經營者／居住者："
+            f"{place.get('operator_name') or display_name}"
             for place in public_places[:12]
         ]
         remaining = len(public_places) - 12
@@ -1459,6 +1495,27 @@ class StudentHubView(UserOwnedView):
         await interaction.response.edit_message(
             embed=student_places_embed(self.owner_id),
             view=self,
+        )
+
+    @discord.ui.button(
+        label="新增地點",
+        style=discord.ButtonStyle.success,
+        emoji="➕",
+        row=1,
+    )
+    async def add_place(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=monk_embed(
+                "🏘️ 新增地點",
+                "選擇地點類型與來源，再決定是否公開。"
+                "商店登記時可以填寫實際店主或共同經營者。",
+                color=0x8B6F47,
+            ),
+            view=PlaceRegistrationOptionsView(self.owner_id),
         )
 
     @discord.ui.button(
@@ -1853,9 +1910,9 @@ class MyPlacesHubView(UserOwnedView):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        await interaction.response.send_message(
+        await interaction.response.edit_message(
             embed=student_places_embed(self.owner_id),
-            ephemeral=True,
+            view=self,
         )
 
     @discord.ui.button(
@@ -2255,9 +2312,13 @@ async def _handle_confession(
         )
         return
 
-    await interaction.response.defer(
-        thinking=True,
-        ephemeral=True,
+    await interaction.response.edit_message(
+        embed=monk_embed(
+            "📖 神諭生成中",
+            "赤木修士正在整理本週素材。請稍候。",
+            color=0x7A5AC8,
+        ),
+        view=None,
     )
 
     try:
@@ -2367,9 +2428,13 @@ async def _handle_current_week_oracle(
     draw_number = reserved_draw
     selection_key = f"{week.key}:draw:{draw_number}"
 
-    await interaction.response.defer(
-        thinking=True,
-        ephemeral=True,
+    await interaction.response.edit_message(
+        embed=monk_embed(
+            "📖 神諭生成中",
+            "赤木修士正在整理本週素材。請稍候。",
+            color=0x7A5AC8,
+        ),
+        view=None,
     )
 
     preferences = profile.get("preferences", {})
@@ -2414,10 +2479,13 @@ async def _handle_current_week_oracle(
             period_key=week.key,
         )
         logger.exception("OpenAI API 神諭生成失敗")
-        await interaction.followup.send(
-            "神諭生成失敗。請稍後再試，"
-            "或請管理員查看 Railway 紀錄。",
-            ephemeral=True,
+        await interaction.edit_original_response(
+            embed=monk_embed(
+                "📖 神諭生成失敗",
+                "神諭生成失敗。請稍後再試，或請管理員查看 Railway 紀錄。",
+                color=0xED4245,
+            ),
+            view=OracleHubView(interaction.user.id),
         )
         return
 
@@ -2442,7 +2510,7 @@ async def _handle_current_week_oracle(
         pages,
         index=index,
     )
-    await interaction.followup.send(
+    await interaction.edit_original_response(
         embed=view.current_embed(),
         view=view,
     )
@@ -2478,9 +2546,13 @@ class OracleHubView(UserOwnedView):
     ) -> None:
         pages = ACADEMY_DB.list_oracles(self.owner_id)
         if not pages:
-            await interaction.response.send_message(
-                "神諭冊目前是空的。請先按「抽取新神諭」建立第一頁。",
-                ephemeral=True,
+            await interaction.response.edit_message(
+                embed=monk_embed(
+                    "📖 神諭冊目前是空的",
+                    "請先按「抽取新神諭」建立第一頁。",
+                    color=0x7A5AC8,
+                ),
+                view=OracleHubView(self.owner_id),
             )
             return
 
@@ -2552,8 +2624,8 @@ class MonkMainPanelView(discord.ui.View):
         await interaction.response.send_message(
             embed=monk_embed(
                 "🏘️ 禊月堂魔法學院城下町",
-                "查看學生商店街、校外居住地，"
-                "或管理自己登記的店鋪與住所。",
+                "查看公開商店街與校外居住地，"
+                "或管理你自己的店鋪與住所。",
                 color=0x8B6F47,
             ),
             view=TownHubView(interaction.user.id),
