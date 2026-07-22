@@ -136,6 +136,12 @@ class AcademyDatabase:
                 ON oracle_pages(user_id, year, month, week_index);
                 """
             )
+            # v12：所有學生自建地點都能作為該玩家的神諭素材。
+            # 保留 allow_oracle 欄位以相容舊資料，但值統一為 1。
+            conn.execute(
+                "UPDATE student_places SET allow_oracle = 1 "
+                "WHERE allow_oracle <> 1"
+            )
             conn.commit()
 
     @staticmethod
@@ -298,7 +304,7 @@ class AcademyDatabase:
                     description.strip(),
                     source_kind.strip(),
                     status.strip(),
-                    int(bool(allow_oracle)),
+                    1,
                     int(bool(is_public)),
                     now,
                     now,
@@ -399,7 +405,7 @@ class AcademyDatabase:
             rows = conn.execute(
                 """
                 SELECT * FROM student_places
-                WHERE user_id = ? AND allow_oracle = 1
+                WHERE user_id = ?
                 ORDER BY id ASC
                 """,
                 (str(user_id),),

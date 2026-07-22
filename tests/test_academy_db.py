@@ -63,12 +63,17 @@ class AcademyDatabaseTests(unittest.TestCase):
             description="夜間營業。",
             source_kind="舊企劃遷入",
             status="營業中",
-            allow_oracle=True,
+            allow_oracle=False,
             is_public=True,
         )
 
         self.assertEqual(len(self.db.list_user_places(123)), 1)
         self.assertEqual(len(self.db.list_public_places("書店")), 1)
+        self.assertEqual(len(self.db.list_oracle_places(123)), 1)
+        self.assertEqual(
+            self.db.list_oracle_places(123)[0]["allow_oracle"],
+            1,
+        )
 
         place = self.db.list_user_places(123)[0]
         hidden = self.db.update_place_visibility(

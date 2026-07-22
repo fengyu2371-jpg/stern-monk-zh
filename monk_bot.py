@@ -359,14 +359,6 @@ class OraclePreferencesModal(discord.ui.Modal, title="神諭偏好設定"):
         required=False,
         max_length=300,
     )
-    allow_places = discord.ui.TextInput(
-        label="允許神諭使用你登記的地點？",
-        placeholder="填「是」或「否」",
-        default="是",
-        required=True,
-        max_length=10,
-    )
-
     def __init__(
         self,
         user_id: int,
@@ -379,9 +371,6 @@ class OraclePreferencesModal(discord.ui.Modal, title="神諭偏好設定"):
         self.avoided_topics.default = existing.get("avoided_topics", "")
         self.creative_keywords.default = existing.get("creative_keywords", "")
         self.preferred_scenes.default = existing.get("preferred_scenes", "")
-        self.allow_places.default = (
-            "是" if existing.get("allow_place_context", 1) else "否"
-        )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if ACADEMY_DB.get_profile(self.user_id) is None:
@@ -397,7 +386,7 @@ class OraclePreferencesModal(discord.ui.Modal, title="神諭偏好設定"):
             avoided_topics=str(self.avoided_topics.value),
             creative_keywords=str(self.creative_keywords.value),
             preferred_scenes=str(self.preferred_scenes.value),
-            allow_place_context=_yes_no(str(self.allow_places.value)),
+            allow_place_context=True,
         )
         await interaction.response.send_message(
             "神諭偏好已保存。姓名只會用於稱呼，不會被拿來推測神諭主題。",
@@ -568,14 +557,12 @@ class PlaceModal(discord.ui.Modal, title="學院街區｜地點登記"):
         user_id: int,
         place_type: str,
         source_kind: str,
-        allow_oracle: bool,
         is_public: bool,
     ) -> None:
         super().__init__()
         self.user_id = int(user_id)
         self.place_type = place_type
         self.source_kind = source_kind
-        self.allow_oracle = allow_oracle
         self.is_public = is_public
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
@@ -594,7 +581,7 @@ class PlaceModal(discord.ui.Modal, title="學院街區｜地點登記"):
             description=str(self.description.value),
             source_kind=self.source_kind,
             status=str(self.status.value),
-            allow_oracle=self.allow_oracle,
+            allow_oracle=True,
             is_public=self.is_public,
         )
 
@@ -605,7 +592,7 @@ class PlaceModal(discord.ui.Modal, title="學院街區｜地點登記"):
                 f"類型：{self.place_type}\n"
                 f"來源：{self.source_kind}\n"
                 f"公開：{'是' if self.is_public else '否'}\n"
-                f"允許神諭使用：{'是' if self.allow_oracle else '否'}\n"
+                f"可作神諭素材：是\n"
                 f"地點編號：{place_id}",
                 color=0x8B6F47,
             ),
@@ -892,9 +879,7 @@ def student_dashboard_embed(user_id: int) -> discord.Embed:
         f"喜歡：{preferences.get('liked_themes') or '未設定'}\n"
         f"避免：{preferences.get('avoided_topics') or '未設定'}\n"
         f"創作關鍵字：{preferences.get('creative_keywords') or '未設定'}\n"
-        f"偏好場景：{preferences.get('preferred_scenes') or '未設定'}\n"
-        f"允許使用個人地點："
-        f"{'是' if preferences.get('allow_place_context', 1) else '否'}"
+        f"偏好場景：{preferences.get('preferred_scenes') or '未設定'}"
     )
     embed.add_field(
         name="🔮 神諭偏好",
@@ -937,9 +922,7 @@ def student_preferences_embed(user_id: int) -> discord.Embed:
         f"**可使用的創作關鍵字**\n"
         f"{preferences.get('creative_keywords') or '未設定'}\n\n"
         f"**偏好場景**\n"
-        f"{preferences.get('preferred_scenes') or '未設定'}\n\n"
-        f"**允許神諭使用個人地點**："
-        f"{'是' if preferences.get('allow_place_context', 1) else '否'}",
+        f"{preferences.get('preferred_scenes') or '未設定'}",
         color=0x7A5AC8,
     )
 
@@ -960,8 +943,7 @@ def student_places_embed(user_id: int) -> discord.Embed:
         lines.append(
             f"**#{place['id']}｜{place['name']}**\n"
             f"{place['place_type']}｜{place['status']}｜"
-            f"{'公開' if place['is_public'] else '不公開'}｜"
-            f"{'可進神諭' if place['allow_oracle'] else '不進神諭'}"
+            f"{'公開' if place['is_public'] else '不公開'}｜可進神諭"
         )
 
     remaining = len(places) - 15
@@ -1358,7 +1340,6 @@ class PlaceRegistrationOptionsView(UserOwnedView):
         super().__init__(owner_id, timeout=900)
         self.place_type = "商店"
         self.source_kind = "新登記"
-        self.allow_oracle = True
         self.is_public = True
 
         type_options = [
@@ -1412,26 +1393,6 @@ class PlaceRegistrationOptionsView(UserOwnedView):
         await interaction.response.defer()
 
     @discord.ui.button(
-        label="神諭可用：是",
-        style=discord.ButtonStyle.success,
-        emoji="🔮",
-        row=2,
-    )
-    async def toggle_oracle(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        self.allow_oracle = not self.allow_oracle
-        button.label = f"神諭可用：{'是' if self.allow_oracle else '否'}"
-        button.style = (
-            discord.ButtonStyle.success
-            if self.allow_oracle
-            else discord.ButtonStyle.secondary
-        )
-        await interaction.response.edit_message(view=self)
-
-    @discord.ui.button(
         label="公開顯示：是",
         style=discord.ButtonStyle.success,
         emoji="👁️",
@@ -1474,7 +1435,6 @@ class PlaceRegistrationOptionsView(UserOwnedView):
                 user_id=self.owner_id,
                 place_type=self.place_type,
                 source_kind=self.source_kind,
-                allow_oracle=self.allow_oracle,
                 is_public=self.is_public,
             )
         )
@@ -1494,7 +1454,7 @@ def place_visibility_embed(place: dict[str, Any]) -> discord.Embed:
         f"**類型**：{place.get('place_type') or '未設定'}\n"
         f"**區域**：{place.get('district') or '未設定'}\n"
         f"**目前設定**：{visibility}\n"
-        f"**神諭可用**：{'是' if place.get('allow_oracle') else '否'}\n\n"
+        f"**可作神諭素材**：是\n\n"
         f"{visibility_note}",
         color=0x8B6F47,
     )
@@ -1757,7 +1717,7 @@ class TownHubView(UserOwnedView):
         await interaction.response.edit_message(
             embed=monk_embed(
                 "🏘️ 城下町｜地點登記",
-                "先選擇類型與來源，再決定是否公開、是否允許神諭使用。",
+                "先選擇類型與來源，再決定是否公開。所有學生地點都可作神諭素材。",
                 color=0x8B6F47,
             ),
             view=PlaceRegistrationOptionsView(self.owner_id),
@@ -2104,10 +2064,8 @@ async def _handle_current_week_oracle(
         )
 
         preferences = profile.get("preferences", {})
-        all_places = (
-            ACADEMY_DB.list_oracle_places(interaction.user.id)
-            if preferences.get("allow_place_context", 1)
-            else []
+        all_places = ACADEMY_DB.list_oracle_places(
+            interaction.user.id
         )
         weekly_keywords = select_weekly_keywords(
             user_id=interaction.user.id,
