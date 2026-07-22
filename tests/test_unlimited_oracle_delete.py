@@ -218,7 +218,7 @@ class LimitAndOwnershipCodeTests(unittest.TestCase):
 
     def test_owner_guard_rejects_other_players(self) -> None:
         self.assertIn(
-            "這是其他學生的修士面板",
+            "這是其他學生的資料面板",
             self.source,
         )
         self.assertIn(

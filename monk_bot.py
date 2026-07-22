@@ -113,7 +113,7 @@ def monk_embed(
     )
 
 
-PLAYER_PANEL_TIMEOUT_SECONDS = 600
+PLAYER_PANEL_TIMEOUT_SECONDS = 300
 
 
 def entry_panel_embed() -> discord.Embed:
@@ -125,7 +125,7 @@ def entry_panel_embed() -> discord.Embed:
         color=0x8B6F47,
     )
     embed.set_footer(
-        text="每位玩家只保留一張面板；10 分鐘未操作會鎖定。"
+        text="玩家功能請直接輸入 /學生資料。"
     )
     return embed
 
@@ -165,8 +165,7 @@ def personal_panel_embed(
 
     if locked:
         description += (
-            "\n\n🔒 此面板已因 10 分鐘未操作而鎖定。"
-            "只有面板本人可以重新開啟。"
+            "\n\n🔒 此面板操作入口已關閉，請重新輸入 /學生資料。"
         )
 
     embed = monk_embed(
@@ -178,7 +177,7 @@ def personal_panel_embed(
         text=(
             "公開可見；只有面板本人能操作。"
             if not locked
-            else "面板內容仍可查看，控制按鈕目前已鎖定。"
+            else "面板內容仍可查看，操作按鈕已關閉。"
         )
     )
     return embed
@@ -215,16 +214,11 @@ class PlayerPanelSession:
 
         clear_player_panel_session(self, cancel_task=False)
         try:
-            await self.message.edit(
-                embed=personal_panel_embed(
-                    self.owner_id,
-                    self.owner_name,
-                    locked=True,
-                ),
-                view=LockedPlayerPanelView(self.owner_id),
-            )
+            # 保留目前公開資料畫面，只移除操作元件。
+            # 玩家要再次操作時必須重新輸入 /學生資料。
+            await self.message.edit(view=None)
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            logger.exception("玩家修士面板逾時鎖定失敗。")
+            logger.exception("玩家修士面板逾時關閉失敗。")
 
 
 ACTIVE_PLAYER_PANELS: dict[int, PlayerPanelSession] = {}
@@ -321,18 +315,12 @@ async def edit_player_panel_from_modal(
 ) -> bool:
     session = current_player_panel(owner_id)
     if session is None:
-        message = await fetch_saved_player_panel(owner_id)
-        if message is None:
-            await interaction.response.send_message(
-                "找不到你的修士面板。請從公共入口重新建立。",
-                ephemeral=True,
-            )
-            return False
-        session = activate_player_panel(
-            owner_id=owner_id,
-            owner_name=interaction.user.display_name,
-            message=message,
+        await interaction.response.send_message(
+            "這張學生資料的操作入口已關閉。"
+            "請重新輸入 `/學生資料`。",
+            ephemeral=True,
         )
+        return False
 
     session.touch()
     await interaction.response.defer()
@@ -439,23 +427,9 @@ class MonkClient(discord.Client):
         ACADEMY_DB.initialize()
         logger.info("修士學籍資料庫已初始化：%s", SETTINGS.monk_db_path)
 
-        # 公共入口與舊面板相容。
-        self.add_view(MonkMainPanelView())
-        self.add_view(StudentDataPanelView())
-
-        # 每位玩家的面板在 Railway 重啟後先以鎖定狀態恢復。
-        for panel in ACADEMY_DB.list_player_panels():
-            try:
-                owner_id = int(panel["user_id"])
-                message_id = int(panel["message_id"])
-            except (TypeError, ValueError, KeyError):
-                continue
-            self.add_view(
-                LockedPlayerPanelView(owner_id),
-                message_id=message_id,
-            )
-
-        logger.info("修士入口與玩家面板 Persistent View 已註冊。")
+        # 玩家功能改由 /學生資料 開啟，不再註冊公共入口。
+        # 舊版已貼出的固定面板不會在重啟後恢復操作。
+        logger.info("玩家學生資料改由斜線指令開啟。")
         if SETTINGS.guild_id is not None:
             guild = discord.Object(id=SETTINGS.guild_id)
             self.tree.copy_global_to(guild=guild)
@@ -509,13 +483,7 @@ class MonkClient(discord.Client):
 
                 try:
                     message = await channel.fetch_message(message_id)
-                    await message.edit(
-                        embed=personal_panel_embed(
-                            owner_id,
-                            locked=True,
-                        ),
-                        view=LockedPlayerPanelView(owner_id),
-                    )
+                    await message.edit(view=None)
                 except (
                     discord.NotFound,
                     discord.Forbidden,
@@ -644,7 +612,7 @@ class UserOwnedView(discord.ui.View):
 
         if interaction.user.id != self.owner_id:
             await interaction.response.send_message(
-                "這是其他學生的修士面板。你可以查看內容，"
+                "這是其他學生的資料面板。你可以查看內容，"
                 "但不能代替對方操作。",
                 ephemeral=True,
             )
@@ -658,63 +626,25 @@ class UserOwnedView(discord.ui.View):
             or str(message.id) != str(record.get("message_id"))
         ):
             await interaction.response.send_message(
-                "這不是目前登記中的個人面板。"
-                "請從公共修士入口重新開啟你的面板。",
+                "這不是你目前的學生資料面板。"
+                "請重新輸入 `/學生資料`。",
                 ephemeral=True,
             )
             return False
 
         session = current_player_panel(self.owner_id)
         if session is None or session.message.id != message.id:
-            session = activate_player_panel(
-                owner_id=self.owner_id,
-                owner_name=interaction.user.display_name,
-                message=message,
+            await interaction.response.send_message(
+                "這張學生資料的操作入口已關閉。"
+                "請重新輸入 `/學生資料`。",
+                ephemeral=True,
             )
-        else:
-            session.touch()
+            return False
+
+        session.touch()
         return True
 
 
-class LockedPlayerPanelView(UserOwnedView):
-    def __init__(self, owner_id: int) -> None:
-        super().__init__(
-            owner_id,
-            timeout=None,
-            add_home_button=False,
-        )
-        self.unlock.custom_id = f"stern_monk:player:unlock:{owner_id}"
-
-    @discord.ui.button(
-        label="重新開啟我的面板",
-        style=discord.ButtonStyle.primary,
-        emoji="🔓",
-        custom_id="stern_monk:player:unlock",
-    )
-    async def unlock(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        if interaction.message is None:
-            await interaction.response.send_message(
-                "找不到個人面板訊息。",
-                ephemeral=True,
-            )
-            return
-
-        activate_player_panel(
-            owner_id=self.owner_id,
-            owner_name=interaction.user.display_name,
-            message=interaction.message,
-        )
-        await interaction.response.edit_message(
-            embed=personal_panel_embed(
-                self.owner_id,
-                interaction.user.display_name,
-            ),
-            view=PlayerPanelHomeView(self.owner_id),
-        )
 
 
 class OraclePreferencesModal(discord.ui.Modal, title="神諭偏好設定"):
@@ -3064,95 +2994,76 @@ class PlayerPanelHomeView(UserOwnedView):
         )
 
 
-class MonkMainPanelView(discord.ui.View):
-    def __init__(self) -> None:
-        super().__init__(timeout=None)
-
-    async def interaction_check(
-        self,
-        interaction: discord.Interaction,
-    ) -> bool:
-        if not _component_channel_allowed(interaction):
-            await _reject_wrong_component_channel(interaction)
-            return False
-        return True
-
-    @discord.ui.button(
-        label="建立／開啟我的面板",
-        style=discord.ButtonStyle.primary,
-        emoji="🎓",
-        custom_id="stern_monk:entry:player_panel",
-    )
-    async def open_player_panel(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        existing = await fetch_saved_player_panel(interaction.user.id)
-        if existing is not None:
-            activate_player_panel(
-                owner_id=interaction.user.id,
-                owner_name=interaction.user.display_name,
-                message=existing,
-            )
-            await existing.edit(
-                embed=personal_panel_embed(
-                    interaction.user.id,
-                    interaction.user.display_name,
-                ),
-                view=PlayerPanelHomeView(interaction.user.id),
-            )
-            await interaction.response.send_message(
-                f"你的修士面板已重新開啟：{existing.jump_url}",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.send_message(
-            embed=personal_panel_embed(
-                interaction.user.id,
-                interaction.user.display_name,
-            ),
-            view=PlayerPanelHomeView(interaction.user.id),
-        )
-        message = await interaction.original_response()
-        ACADEMY_DB.save_player_panel(
-            user_id=interaction.user.id,
-            channel_id=message.channel.id,
-            message_id=message.id,
-        )
-        activate_player_panel(
-            owner_id=interaction.user.id,
-            owner_name=interaction.user.display_name,
-            message=message,
-        )
 
 
 @tree.command(
-    name="建立修士面板",
-    description="由管理員建立固定的修士功能面板",
+    name="學生資料",
+    description="查看並管理自己的學籍、地點與神諭設定",
 )
-@app_commands.default_permissions(manage_guild=True)
-async def create_monk_panel(
+async def student_data_command(
     interaction: discord.Interaction,
 ) -> None:
-    permissions = getattr(
-        interaction.user,
-        "guild_permissions",
-        None,
+    await interaction.response.defer(thinking=True)
+
+    # 每次重新輸入指令，都關閉並移除上一張個人操作面板，
+    # 讓頻道中只保留玩家目前這一張。
+    previous_session = current_player_panel(interaction.user.id)
+    if previous_session is not None:
+        clear_player_panel_session(previous_session)
+
+    previous_message = await fetch_saved_player_panel(
+        interaction.user.id
     )
-    if permissions is None or not permissions.manage_guild:
-        await interaction.response.send_message(
-            "只有具有「管理伺服器」權限的管理員能建立面板。",
-            ephemeral=True,
+    if previous_message is not None:
+        try:
+            await previous_message.delete()
+        except (
+            discord.NotFound,
+            discord.Forbidden,
+            discord.HTTPException,
+        ):
+            # 無法刪除時仍會覆寫資料庫紀錄，舊按鈕也因 Railway
+            # 重啟或原工作階段失效而無法操作。
+            try:
+                await previous_message.edit(view=None)
+            except (
+                discord.NotFound,
+                discord.Forbidden,
+                discord.HTTPException,
+            ):
+                pass
+
+    profile = ACADEMY_DB.get_profile_bundle(
+        interaction.user.id
+    )
+    if profile is None:
+        embed = monk_embed(
+            "🎓 入學登記",
+            "尚未建立學籍。先選擇學院與入學年份，"
+            "再填寫學生資料。",
+            color=0x5865F2,
         )
-        return
+        view: discord.ui.View = EnrollmentSetupView(
+            interaction.user.id
+        )
+    else:
+        embed = student_dashboard_embed(interaction.user.id)
+        view = StudentHubView(interaction.user.id)
 
-    embed = entry_panel_embed()
-
-    await interaction.response.send_message(
+    message = await interaction.edit_original_response(
         embed=embed,
-        view=MonkMainPanelView(),
+        view=view,
+    )
+
+    ACADEMY_DB.save_player_panel(
+        user_id=interaction.user.id,
+        channel_id=message.channel.id,
+        message_id=message.id,
+    )
+    activate_player_panel(
+        owner_id=interaction.user.id,
+        owner_name=interaction.user.display_name,
+        message=message,
     )
 
 
@@ -3176,7 +3087,7 @@ async def monk_status(
     )
     await interaction.response.send_message(
         "修士目前在線。\n\n"
-        "玩家操作方式：**固定功能面板**\n"
+        "玩家操作方式：**`/學生資料`**\n"
         "公開斜線指令數量：**2**\n"
         "AI 教學：**永久停用**\n"
         f"AI 告解：**{confession_ai_status}**\n"

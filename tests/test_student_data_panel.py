@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 
-class MonkMainPanelTests(unittest.TestCase):
+class StudentCommandFiveMinuteCloseTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = (
@@ -11,75 +11,97 @@ class MonkMainPanelTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         cls.tree = ast.parse(cls.source)
 
-    def test_panel_command_exists(self) -> None:
-        self.assertIn('name="建立修士面板"', self.source)
-
-    def test_main_panel_is_persistent(self) -> None:
+    def test_student_data_is_direct_command(self) -> None:
         self.assertIn(
-            "class MonkMainPanelView(discord.ui.View)",
+            'name="學生資料"',
             self.source,
         )
         self.assertIn(
-            "super().__init__(timeout=None)",
+            'description="查看並管理自己的學籍、地點與神諭設定"',
+            self.source,
+        )
+        self.assertNotIn(
+            'name="建立修士面板"',
+            self.source,
+        )
+
+    def test_command_sends_student_page_directly(self) -> None:
+        command = next(
+            node
+            for node in self.tree.body
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "student_data_command"
+        )
+        rendered = ast.unparse(command)
+        self.assertIn("student_dashboard_embed", rendered)
+        self.assertIn("EnrollmentSetupView", rendered)
+        self.assertIn("edit_original_response", rendered)
+        self.assertIn("save_player_panel", rendered)
+
+    def test_other_players_cannot_operate(self) -> None:
+        self.assertIn(
+            "這是其他學生的資料面板",
             self.source,
         )
         self.assertIn(
-            "stern_monk:entry:player_panel",
+            "不能代替對方操作",
             self.source,
         )
 
-    def test_main_panel_is_registered_on_startup(self) -> None:
+    def test_five_minute_timeout_removes_view(self) -> None:
         self.assertIn(
-            "self.add_view(MonkMainPanelView())",
+            "PLAYER_PANEL_TIMEOUT_SECONDS = 300",
             self.source,
         )
+        session = next(
+            node
+            for node in self.tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name == "PlayerPanelSession"
+        )
+        rendered = ast.unparse(session)
+        self.assertIn("message.edit(view=None)", rendered)
+        self.assertNotIn("LockedPlayerPanelView", rendered)
 
-    def test_main_buttons_exist(self) -> None:
-        for label in (
-            'label="學生資料"',
-            'label="城下町"',
-            'label="神諭冊"',
-            'label="教學"',
-            'label="告解"',
-        ):
-            self.assertIn(label, self.source)
+    def test_closed_panel_does_not_auto_reactivate(self) -> None:
+        owned = next(
+            node
+            for node in self.tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name == "UserOwnedView"
+        )
+        rendered = ast.unparse(owned)
+        self.assertIn("操作入口已關閉", rendered)
+        self.assertNotIn("activate_player_panel", rendered)
 
-    def test_private_views_check_owner(self) -> None:
-        for class_name in (
-            "EnrollmentSetupView",
-            "StudentHubView",
-            "TownHubView",
-            "TeachingHubView",
-            "OracleHubView",
-        ):
-            self.assertIn(
-                f"class {class_name}(UserOwnedView)",
-                self.source,
-            )
-
-    def test_slash_command_count_is_two(self) -> None:
-        command_names = []
-        for node in self.tree.body:
-            if not isinstance(node, ast.AsyncFunctionDef):
+    def test_commands_are_student_data_and_status(self) -> None:
+        names = []
+        for node in ast.walk(self.tree):
+            if not isinstance(
+                node,
+                (ast.FunctionDef, ast.AsyncFunctionDef),
+            ):
                 continue
             for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call):
+                    continue
+                func = decorator.func
                 if (
-                    isinstance(decorator, ast.Call)
-                    and isinstance(decorator.func, ast.Attribute)
-                    and isinstance(decorator.func.value, ast.Name)
-                    and decorator.func.value.id == "tree"
-                    and decorator.func.attr == "command"
+                    isinstance(func, ast.Attribute)
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "tree"
+                    and func.attr == "command"
                 ):
                     for keyword in decorator.keywords:
                         if (
                             keyword.arg == "name"
                             and isinstance(keyword.value, ast.Constant)
                         ):
-                            command_names.append(keyword.value.value)
+                            names.append(keyword.value.value)
 
         self.assertEqual(
-            command_names,
-            ["建立修士面板", "修士狀態"],
+            sorted(names),
+            sorted(["學生資料", "修士狀態"]),
         )
 
 

@@ -1,30 +1,9 @@
 import ast
-import tempfile
 import unittest
 from pathlib import Path
 
-from academy_db import AcademyDatabase
 
-
-class PlayerPanelDatabaseTests(unittest.TestCase):
-    def test_panel_record_round_trip(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            db = AcademyDatabase(Path(temp_dir) / "monk.db")
-            db.initialize()
-            db.save_player_panel(
-                user_id=123,
-                channel_id=456,
-                message_id=789,
-            )
-            panel = db.get_player_panel(123)
-            self.assertEqual(panel["channel_id"], "456")
-            self.assertEqual(panel["message_id"], "789")
-            self.assertEqual(len(db.list_player_panels()), 1)
-            self.assertTrue(db.delete_player_panel(123))
-            self.assertIsNone(db.get_player_panel(123))
-
-
-class OnePanelPerPlayerTests(unittest.TestCase):
+class StudentCommandFiveMinuteCloseTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = (
@@ -32,27 +11,36 @@ class OnePanelPerPlayerTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         cls.tree = ast.parse(cls.source)
 
-    def test_entry_has_single_player_panel_button(self) -> None:
+    def test_student_data_is_direct_command(self) -> None:
         self.assertIn(
-            'label="建立／開啟我的面板"',
+            'name="學生資料"',
             self.source,
         )
         self.assertIn(
-            "fetch_saved_player_panel(interaction.user.id)",
+            'description="查看並管理自己的學籍、地點與神諭設定"',
             self.source,
         )
-        self.assertIn(
-            "ACADEMY_DB.save_player_panel(",
+        self.assertNotIn(
+            'name="建立修士面板"',
             self.source,
         )
 
-    def test_player_panel_is_public_and_owner_guarded(self) -> None:
-        self.assertIn(
-            "class PlayerPanelHomeView(UserOwnedView)",
-            self.source,
+    def test_command_sends_student_page_directly(self) -> None:
+        command = next(
+            node
+            for node in self.tree.body
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "student_data_command"
         )
+        rendered = ast.unparse(command)
+        self.assertIn("student_dashboard_embed", rendered)
+        self.assertIn("EnrollmentSetupView", rendered)
+        self.assertIn("edit_original_response", rendered)
+        self.assertIn("save_player_panel", rendered)
+
+    def test_other_players_cannot_operate(self) -> None:
         self.assertIn(
-            "這是其他學生的修士面板",
+            "這是其他學生的資料面板",
             self.source,
         )
         self.assertIn(
@@ -60,59 +48,39 @@ class OnePanelPerPlayerTests(unittest.TestCase):
             self.source,
         )
 
-    def test_timeout_is_ten_minutes(self) -> None:
+    def test_five_minute_timeout_removes_view(self) -> None:
         self.assertIn(
-            "PLAYER_PANEL_TIMEOUT_SECONDS = 600",
+            "PLAYER_PANEL_TIMEOUT_SECONDS = 300",
             self.source,
         )
-        self.assertIn(
-            "10 分鐘未操作而鎖定",
-            self.source,
+        session = next(
+            node
+            for node in self.tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name == "PlayerPanelSession"
         )
-        self.assertIn(
-            "class LockedPlayerPanelView(UserOwnedView)",
-            self.source,
-        )
+        rendered = ast.unparse(session)
+        self.assertIn("message.edit(view=None)", rendered)
+        self.assertNotIn("LockedPlayerPanelView", rendered)
 
-    def test_public_store_data_remains_available(self) -> None:
-        self.assertIn(
-            "ACADEMY_DB.list_public_places()",
-            self.source,
+    def test_closed_panel_does_not_auto_reactivate(self) -> None:
+        owned = next(
+            node
+            for node in self.tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name == "UserOwnedView"
         )
-        self.assertIn(
-            "place.get('operator_name')",
-            self.source,
-        )
-        self.assertIn(
-            "class PlacesView(UserOwnedView)",
-            self.source,
-        )
+        rendered = ast.unparse(owned)
+        self.assertIn("操作入口已關閉", rendered)
+        self.assertNotIn("activate_player_panel", rendered)
 
-    def test_modal_results_edit_existing_panel(self) -> None:
-        self.assertIn(
-            "edit_player_panel_from_modal",
-            self.source,
-        )
-        for class_name in (
-            "OraclePreferencesModal",
-            "EnrollmentModal",
-            "PlaceModal",
-        ):
-            node = next(
-                item
-                for item in self.tree.body
-                if isinstance(item, ast.ClassDef)
-                and item.name == class_name
-            )
-            self.assertIn(
-                "edit_player_panel_from_modal",
-                ast.unparse(node),
-            )
-
-    def test_command_count_remains_two(self) -> None:
+    def test_commands_are_student_data_and_status(self) -> None:
         names = []
         for node in ast.walk(self.tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not isinstance(
+                node,
+                (ast.FunctionDef, ast.AsyncFunctionDef),
+            ):
                 continue
             for decorator in node.decorator_list:
                 if not isinstance(decorator, ast.Call):
@@ -130,9 +98,10 @@ class OnePanelPerPlayerTests(unittest.TestCase):
                             and isinstance(keyword.value, ast.Constant)
                         ):
                             names.append(keyword.value.value)
+
         self.assertEqual(
             sorted(names),
-            sorted(["建立修士面板", "修士狀態"]),
+            sorted(["學生資料", "修士狀態"]),
         )
 
 

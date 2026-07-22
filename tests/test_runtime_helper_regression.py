@@ -37,10 +37,10 @@ class RuntimeHelperRegressionTests(unittest.TestCase):
             node
             for node in self.tree.body
             if isinstance(node, ast.AsyncFunctionDef)
-            and node.name == "create_monk_panel"
+            and node.name == "student_data_command"
         )
         rendered = ast.unparse(command)
-        self.assertIn("entry_panel_embed()", rendered)
+        self.assertIn("student_dashboard_embed", rendered)
         self.assertIn("monk_embed", self.function_names)
 
 

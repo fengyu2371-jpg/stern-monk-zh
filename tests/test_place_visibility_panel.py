@@ -44,7 +44,7 @@ class PlaceVisibilityPanelTests(unittest.TestCase):
 
         self.assertEqual(
             sorted(command_names),
-            sorted(["建立修士面板", "修士狀態"]),
+            sorted(["學生資料", "修士狀態"]),
         )
 
 
