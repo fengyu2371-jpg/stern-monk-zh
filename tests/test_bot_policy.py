@@ -4,29 +4,31 @@ from pathlib import Path
 
 
 class BotPolicyTests(unittest.TestCase):
-    def test_teaching_code_has_no_openai_router_or_rules_context(self) -> None:
-        root = Path(__file__).resolve().parents[1]
-        bot_source = (root / "monk_bot.py").read_text(
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.root = Path(__file__).resolve().parents[1]
+        cls.source = (cls.root / "monk_bot.py").read_text(
             encoding="utf-8"
         )
-        knowledge_source = (root / "knowledge.py").read_text(encoding="utf-8")
+        cls.tree = ast.parse(cls.source)
 
-        self.assertNotIn("MONK_AI_INSTRUCTIONS", bot_source)
-        self.assertNotIn("RULES_CONTEXT", bot_source)
-        self.assertNotIn("async def ask_openai(question", bot_source)
-        self.assertNotIn("answer_question(KNOWLEDGE, 問題,", bot_source)
+    def test_teaching_code_has_no_openai_router_or_rules_context(self) -> None:
+        knowledge_source = (self.root / "knowledge.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn("MONK_AI_INSTRUCTIONS", self.source)
+        self.assertNotIn("RULES_CONTEXT", self.source)
+        self.assertNotIn("async def ask_openai(question", self.source)
         self.assertNotIn("ai_fallback", knowledge_source)
         self.assertNotIn("build_rules_context", knowledge_source)
 
-    def test_openai_confession_is_only_called_by_confession_command(self) -> None:
-        source = (
-            Path(__file__).resolve().parents[1] / "monk_bot.py"
-        ).read_text(encoding="utf-8")
-        tree = ast.parse(source)
+    def test_openai_confession_is_only_called_by_handler(self) -> None:
         callers: list[str] = []
-
         for function in (
-            node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef)
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.AsyncFunctionDef)
         ):
             if any(
                 isinstance(node, ast.Call)
@@ -36,17 +38,14 @@ class BotPolicyTests(unittest.TestCase):
             ):
                 callers.append(function.name)
 
-        self.assertEqual(callers, ["monk_confession"])
+        self.assertEqual(callers, ["_handle_confession"])
 
-    def test_oracle_openai_is_only_called_by_current_week_command(self) -> None:
-        source = (
-            Path(__file__).resolve().parents[1] / "monk_bot.py"
-        ).read_text(encoding="utf-8")
-        tree = ast.parse(source)
+    def test_oracle_openai_is_only_called_by_handler(self) -> None:
         callers: list[str] = []
-
         for function in (
-            node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef)
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.AsyncFunctionDef)
         ):
             if any(
                 isinstance(node, ast.Call)
@@ -56,16 +55,12 @@ class BotPolicyTests(unittest.TestCase):
             ):
                 callers.append(function.name)
 
-        self.assertEqual(callers, ["current_week_oracle"])
+        self.assertEqual(callers, ["_handle_current_week_oracle"])
 
     def test_confession_response_is_stored_for_openai_logs(self) -> None:
-        source = (
-            Path(__file__).resolve().parents[1] / "monk_bot.py"
-        ).read_text(encoding="utf-8")
-        tree = ast.parse(source)
         confession_function = next(
             node
-            for node in tree.body
+            for node in self.tree.body
             if isinstance(node, ast.AsyncFunctionDef)
             and node.name == "ask_openai_confession"
         )
@@ -77,20 +72,18 @@ class BotPolicyTests(unittest.TestCase):
             and node.func.attr == "create"
         )
         store_keyword = next(
-            keyword for keyword in response_call.keywords if keyword.arg == "store"
+            keyword
+            for keyword in response_call.keywords
+            if keyword.arg == "store"
         )
 
         self.assertIsInstance(store_keyword.value, ast.Constant)
         self.assertIs(store_keyword.value.value, True)
 
     def test_teaching_lookup_passes_no_api_callback(self) -> None:
-        source = (
-            Path(__file__).resolve().parents[1] / "monk_bot.py"
-        ).read_text(encoding="utf-8")
-        tree = ast.parse(source)
         teaching_calls = [
             node
-            for node in ast.walk(tree)
+            for node in ast.walk(self.tree)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
             and node.func.id == "answer_question"
@@ -100,49 +93,57 @@ class BotPolicyTests(unittest.TestCase):
         self.assertEqual(len(teaching_calls[0].args), 2)
         self.assertEqual(teaching_calls[0].keywords, [])
 
-
-    def test_monk_introduction_command_exists(self) -> None:
-        source = (
-            Path(__file__).resolve().parents[1] / "monk_bot.py"
-        ).read_text(encoding="utf-8")
-
-        self.assertIn('name="修士介紹"', source)
-        self.assertIn("全學院制霸", source)
-        self.assertIn("尊重赤木學長", source)
+    def test_character_setting_remains_in_panel_project(self) -> None:
+        self.assertIn("全院制霸", self.source)
+        self.assertIn("尊重赤木學長", self.source)
 
     def test_gorilla_nickname_is_handled_locally(self) -> None:
-        source = (
-            Path(__file__).resolve().parents[1] / "monk_bot.py"
-        ).read_text(encoding="utf-8")
-
-        self.assertIn("gorilla_nickname_reply(問題)", source)
-        self.assertIn("gorilla_nickname_reply(內容)", source)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.assertIn("gorilla_nickname_reply(question)", self.source)
+        self.assertIn("gorilla_nickname_reply(content)", self.source)
 
 
 class CampusFeatureTests(unittest.TestCase):
-    def test_campus_commands_exist(self) -> None:
-        source = (
-            Path(__file__).resolve().parents[1] / "monk_bot.py"
-        ).read_text(encoding="utf-8")
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.root = Path(__file__).resolve().parents[1]
+        cls.source = (cls.root / "monk_bot.py").read_text(
+            encoding="utf-8"
+        )
 
-        for command_name in (
+    def test_student_and_campus_features_are_buttons_not_commands(self) -> None:
+        for old_command_name in (
             "入學登記",
             "我的學籍",
             "地點登記",
             "學院街區",
             "本週神諭",
             "神諭冊",
+            "修士告解",
+            "修士教學",
+            "問修士",
         ):
-            self.assertIn(f'name="{command_name}"', source)
+            self.assertNotIn(
+                f'name="{old_command_name}"',
+                self.source,
+            )
+
+        for class_name in (
+            "EnrollmentSetupView",
+            "TownHubView",
+            "OracleHubView",
+            "TeachingHubView",
+            "ConfessionModal",
+        ):
+            self.assertIn(class_name, self.source)
 
     def test_database_is_not_church_db(self) -> None:
         config_source = (
-            Path(__file__).resolve().parents[1] / "config.py"
+            self.root / "config.py"
         ).read_text(encoding="utf-8")
 
         self.assertIn("/app/storage/monk.db", config_source)
         self.assertNotIn("church.db", config_source)
+
+
+if __name__ == "__main__":
+    unittest.main()

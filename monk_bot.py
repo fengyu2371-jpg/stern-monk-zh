@@ -218,8 +218,10 @@ class MonkClient(discord.Client):
         logger.info("修士學籍資料庫已初始化：%s", SETTINGS.monk_db_path)
 
         # 重新註冊固定面板，讓 Railway 重啟後舊訊息上的按鈕仍可使用。
+        self.add_view(MonkMainPanelView())
+        # 相容 v9 已經貼出的舊學生資料面板。
         self.add_view(StudentDataPanelView())
-        logger.info("學生資料中心 Persistent View 已註冊。")
+        logger.info("修士主面板 Persistent View 已註冊。")
         if SETTINGS.guild_id is not None:
             guild = discord.Object(id=SETTINGS.guild_id)
             self.tree.copy_global_to(guild=guild)
@@ -384,7 +386,7 @@ class OraclePreferencesModal(discord.ui.Modal, title="神諭偏好設定"):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if ACADEMY_DB.get_profile(self.user_id) is None:
             await interaction.response.send_message(
-                "請先使用 `/入學登記` 建立學籍。",
+                "請先從修士主面板的「學生資料」完成入學登記。",
                 ephemeral=True,
             )
             return
@@ -579,7 +581,7 @@ class PlaceModal(discord.ui.Modal, title="學院街區｜地點登記"):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if ACADEMY_DB.get_profile(self.user_id) is None:
             await interaction.response.send_message(
-                "請先完成 `/入學登記`，再登記個人地點。",
+                "請先從修士主面板的「學生資料」完成入學登記，再登記個人地點。",
                 ephemeral=True,
             )
             return
@@ -859,7 +861,7 @@ def student_dashboard_embed(user_id: int) -> discord.Embed:
         return monk_embed(
             "🎓 禊月堂學生資料中心",
             "目前尚未建立學籍。\n\n"
-            "請先使用 `/入學登記` 填寫入學資料；完成後再回來按這顆按鈕。",
+            "請從修士主面板的「學生資料」完成入學登記。",
             color=0x5865F2,
         )
 
@@ -922,7 +924,7 @@ def student_preferences_embed(user_id: int) -> discord.Embed:
         return monk_embed(
             "🔮 我的神諭偏好",
             "目前尚未設定神諭偏好。\n\n"
-            "可以使用 `/神諭偏好` 補充喜歡的題材、避免內容與創作關鍵字。",
+            "請從「學生資料」頁面的神諭偏好按鈕補充設定。",
             color=0x7A5AC8,
         )
 
@@ -948,7 +950,7 @@ def student_places_embed(user_id: int) -> discord.Embed:
         return monk_embed(
             "🏘️ 我的學院街區地點",
             "目前沒有登記地點。\n\n"
-            "可以使用 `/地點登記` 建立商店、校外住處、工作室，"
+            "請從修士主面板的「城下町」選擇「登記地點」，"
             "或把過去企劃中的店面遷入學院街區。",
             color=0x8B6F47,
         )
@@ -1035,7 +1037,7 @@ class StudentPrivateMenuView(UserOwnedView):
         pages = ACADEMY_DB.list_oracles(self.owner_id)
         if not pages:
             await interaction.response.send_message(
-                "神諭冊目前是空的。請先使用 `/本週神諭` 建立第一頁。",
+                "神諭冊目前是空的。請從主面板的「神諭冊」領取本週神諭。",
                 ephemeral=True,
             )
             return
@@ -1090,263 +1092,776 @@ class StudentDataPanelView(discord.ui.View):
         )
 
 
-@tree.command(
-    name="建立學生資料面板",
-    description="由管理員建立固定的學生資料查看按鈕",
-)
-@app_commands.default_permissions(manage_guild=True)
-async def create_student_data_panel(
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+TEACHING_CHOICES = [
+    app_commands.Choice(name=item["title"], value=item["id"])
+    for item in KNOWLEDGE.tutorials
+]
+
+
+
+
+
+
+
+
+
+
+
+def _component_channel_allowed(interaction: discord.Interaction) -> bool:
+    return is_allowed_channel(
+        interaction.channel_id,
+        SETTINGS.monk_channel_id,
+    )
+
+
+async def _reject_wrong_component_channel(
     interaction: discord.Interaction,
 ) -> None:
-    member = interaction.user
-    permissions = getattr(member, "guild_permissions", None)
-    if permissions is None or not permissions.manage_guild:
-        await interaction.response.send_message(
-            "只有具有「管理伺服器」權限的管理員能建立這個面板。",
-            ephemeral=True,
-        )
-        return
-
-    embed = monk_embed(
-        "🎓 禊月堂學生資料中心",
-        "按下下方按鈕，即可查看自己保存的：\n\n"
-        "・入學學籍與希望稱呼\n"
-        "・神諭偏好與避免題材\n"
-        "・個人商店、住處與工作室\n"
-        "・神諭冊頁數與本週完成狀態\n\n"
-        "**查詢結果只會私密顯示給按鈕操作者本人。**",
-        color=0x5865F2,
-    )
-
     await interaction.response.send_message(
-        embed=embed,
-        view=StudentDataPanelView(),
-    )
-
-
-
-@tree.command(
-    name="入學登記",
-    description="填寫魔法大學入學資料",
-)
-@app_commands.describe(
-    學院="目前所屬學院",
-    入學年份="例如 2026；可留白",
-)
-@app_commands.choices(學院=HOUSE_CHOICES)
-async def enroll_student(
-    interaction: discord.Interaction,
-    學院: app_commands.Choice[str],
-    入學年份: app_commands.Range[str, 0, 12] = "",
-) -> None:
-    existing = ACADEMY_DB.get_profile(interaction.user.id)
-    await interaction.response.send_modal(
-        EnrollmentModal(
-            user_id=interaction.user.id,
-            house=學院.value,
-            enrollment_year=str(入學年份),
-            existing=existing,
-        )
-    )
-
-
-@tree.command(
-    name="我的學籍",
-    description="查看自己的入學資料與神諭偏好",
-)
-async def my_student_profile(interaction: discord.Interaction) -> None:
-    profile = ACADEMY_DB.get_profile_bundle(interaction.user.id)
-    if profile is None:
-        await interaction.response.send_message(
-            "尚未建立學籍。請先使用 `/入學登記`。",
-            ephemeral=True,
-        )
-        return
-    await interaction.response.send_message(
-        embed=student_profile_embed(profile),
+        f"修士功能面板只能在 <#{SETTINGS.monk_channel_id}> 使用。",
         ephemeral=True,
     )
 
 
-@tree.command(
-    name="修改學籍",
-    description="修改自己的魔法大學入學資料",
-)
-@app_commands.describe(
-    學院="更新後的學院；不填則保留原本設定",
-    入學年份="更新後的入學年份；不填則保留原本設定",
-)
-@app_commands.choices(學院=HOUSE_CHOICES)
-async def edit_student_profile(
-    interaction: discord.Interaction,
-    學院: app_commands.Choice[str] | None = None,
-    入學年份: app_commands.Range[str, 0, 12] | None = None,
-) -> None:
-    existing = ACADEMY_DB.get_profile(interaction.user.id)
-    if existing is None:
-        await interaction.response.send_message(
-            "尚未建立學籍。請先使用 `/入學登記`。",
-            ephemeral=True,
+class EnrollmentSetupView(UserOwnedView):
+    def __init__(
+        self,
+        owner_id: int,
+        existing: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(owner_id, timeout=900)
+        self.existing = existing or {}
+        self.selected_house = self.existing.get("house") or "尚未分院"
+        self.selected_year = (
+            self.existing.get("enrollment_year")
+            or str(date.today().year)
         )
-        return
 
-    await interaction.response.send_modal(
-        EnrollmentModal(
-            user_id=interaction.user.id,
-            house=學院.value if 學院 else existing["house"],
-            enrollment_year=(
-                str(入學年份)
-                if 入學年份 is not None
-                else existing["enrollment_year"]
+        house_options = [
+            discord.SelectOption(
+                label=choice.name,
+                value=choice.value,
+                default=choice.value == self.selected_house,
+            )
+            for choice in HOUSE_CHOICES
+        ]
+        self.house_select = discord.ui.Select(
+            placeholder="選擇所屬學院",
+            min_values=1,
+            max_values=1,
+            options=house_options,
+            row=0,
+        )
+        self.house_select.callback = self._on_house_selected
+        self.add_item(self.house_select)
+
+        year_values = [
+            str(year)
+            for year in range(date.today().year - 3, date.today().year + 2)
+        ]
+        if self.selected_year and self.selected_year not in year_values:
+            year_values.insert(0, self.selected_year)
+        year_values.append("未填寫")
+
+        year_options = [
+            discord.SelectOption(
+                label=value,
+                value="__none__" if value == "未填寫" else value,
+                default=(
+                    (value == "未填寫" and not self.selected_year)
+                    or value == self.selected_year
+                ),
+            )
+            for value in year_values
+        ]
+        self.year_select = discord.ui.Select(
+            placeholder="選擇入學年份",
+            min_values=1,
+            max_values=1,
+            options=year_options,
+            row=1,
+        )
+        self.year_select.callback = self._on_year_selected
+        self.add_item(self.year_select)
+
+    async def _on_house_selected(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        self.selected_house = self.house_select.values[0]
+        await interaction.response.defer()
+
+    async def _on_year_selected(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        selected = self.year_select.values[0]
+        self.selected_year = "" if selected == "__none__" else selected
+        await interaction.response.defer()
+
+    @discord.ui.button(
+        label="繼續填寫入學資料",
+        style=discord.ButtonStyle.primary,
+        emoji="✏️",
+        row=2,
+    )
+    async def continue_enrollment(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.send_modal(
+            EnrollmentModal(
+                user_id=self.owner_id,
+                house=self.selected_house,
+                enrollment_year=self.selected_year,
+                existing=self.existing,
+            )
+        )
+
+
+class StudentHubView(UserOwnedView):
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(owner_id, timeout=900)
+
+    @discord.ui.button(
+        label="學籍總覽",
+        style=discord.ButtonStyle.primary,
+        emoji="🎓",
+        row=0,
+    )
+    async def show_profile(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=student_dashboard_embed(self.owner_id),
+            view=self,
+        )
+
+    @discord.ui.button(
+        label="修改學籍",
+        style=discord.ButtonStyle.secondary,
+        emoji="✏️",
+        row=0,
+    )
+    async def edit_profile(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        existing = ACADEMY_DB.get_profile(self.owner_id)
+        if existing is None:
+            await interaction.response.edit_message(
+                embed=monk_embed(
+                    "🎓 入學登記",
+                    "請先選擇學院與入學年份，再繼續填寫資料。",
+                    color=0x5865F2,
+                ),
+                view=EnrollmentSetupView(self.owner_id),
+            )
+            return
+
+        await interaction.response.edit_message(
+            embed=monk_embed(
+                "✏️ 修改學籍",
+                "先確認學院與入學年份，再開啟資料表單。",
+                color=0x5865F2,
             ),
-            existing=existing,
+            view=EnrollmentSetupView(self.owner_id, existing),
         )
+
+    @discord.ui.button(
+        label="神諭偏好",
+        style=discord.ButtonStyle.secondary,
+        emoji="🔮",
+        row=0,
     )
-
-
-@tree.command(
-    name="神諭偏好",
-    description="設定神諭創作偏好與避免題材",
-)
-async def oracle_preferences(interaction: discord.Interaction) -> None:
-    if ACADEMY_DB.get_profile(interaction.user.id) is None:
-        await interaction.response.send_message(
-            "請先使用 `/入學登記` 建立學籍。",
-            ephemeral=True,
+    async def edit_preferences(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        existing = ACADEMY_DB.get_preferences(self.owner_id)
+        await interaction.response.send_modal(
+            OraclePreferencesModal(self.owner_id, existing)
         )
-        return
-    existing = ACADEMY_DB.get_preferences(interaction.user.id)
-    await interaction.response.send_modal(
-        OraclePreferencesModal(interaction.user.id, existing)
+
+    @discord.ui.button(
+        label="我的地點",
+        style=discord.ButtonStyle.secondary,
+        emoji="🏘️",
+        row=0,
     )
-
-
-@tree.command(
-    name="刪除學籍",
-    description="刪除自己的學籍、個人地點與神諭冊",
-)
-async def delete_student_profile(interaction: discord.Interaction) -> None:
-    if ACADEMY_DB.get_profile(interaction.user.id) is None:
-        await interaction.response.send_message(
-            "目前沒有可刪除的學籍。",
-            ephemeral=True,
+    async def show_places(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=student_places_embed(self.owner_id),
+            view=self,
         )
-        return
 
-    await interaction.response.send_message(
-        "這會同時刪除你的學籍、神諭偏好、個人地點與神諭頁面。確定要繼續嗎？",
-        view=DeleteProfileView(interaction.user.id),
-        ephemeral=True,
+    @discord.ui.button(
+        label="刪除學籍",
+        style=discord.ButtonStyle.danger,
+        emoji="🗑️",
+        row=1,
     )
+    async def delete_profile(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            content=(
+                "這會刪除你的學籍、神諭偏好、個人地點與神諭冊。"
+                "確定要繼續嗎？"
+            ),
+            embed=None,
+            view=DeleteProfileView(self.owner_id),
+        )
 
 
-@tree.command(
-    name="地點登記",
-    description="把商店、住處或舊企劃地點登記進學院街區",
-)
-@app_commands.describe(
-    類型="商店、住處或其他地點類型",
-    來源="新地點或舊企劃遷入",
-    允許神諭使用="是否允許每週神諭採用這個地點",
-    是否公開="是否出現在公開學院街區",
-)
-@app_commands.choices(
-    類型=PLACE_TYPE_CHOICES,
-    來源=PLACE_SOURCE_CHOICES,
-)
-async def register_place(
+class PlaceRegistrationOptionsView(UserOwnedView):
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(owner_id, timeout=900)
+        self.place_type = "商店"
+        self.source_kind = "新登記"
+        self.allow_oracle = True
+        self.is_public = True
+
+        type_options = [
+            discord.SelectOption(
+                label=choice.name,
+                value=choice.value,
+                default=choice.value == self.place_type,
+            )
+            for choice in PLACE_TYPE_CHOICES
+        ]
+        self.type_select = discord.ui.Select(
+            placeholder="選擇地點類型",
+            min_values=1,
+            max_values=1,
+            options=type_options,
+            row=0,
+        )
+        self.type_select.callback = self._on_type_selected
+        self.add_item(self.type_select)
+
+        source_options = [
+            discord.SelectOption(
+                label=choice.name,
+                value=choice.value,
+                default=choice.value == self.source_kind,
+            )
+            for choice in PLACE_SOURCE_CHOICES
+        ]
+        self.source_select = discord.ui.Select(
+            placeholder="選擇地點來源",
+            min_values=1,
+            max_values=1,
+            options=source_options,
+            row=1,
+        )
+        self.source_select.callback = self._on_source_selected
+        self.add_item(self.source_select)
+
+    async def _on_type_selected(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        self.place_type = self.type_select.values[0]
+        await interaction.response.defer()
+
+    async def _on_source_selected(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        self.source_kind = self.source_select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.button(
+        label="神諭可用：是",
+        style=discord.ButtonStyle.success,
+        emoji="🔮",
+        row=2,
+    )
+    async def toggle_oracle(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        self.allow_oracle = not self.allow_oracle
+        button.label = f"神諭可用：{'是' if self.allow_oracle else '否'}"
+        button.style = (
+            discord.ButtonStyle.success
+            if self.allow_oracle
+            else discord.ButtonStyle.secondary
+        )
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(
+        label="公開顯示：是",
+        style=discord.ButtonStyle.success,
+        emoji="👁️",
+        row=2,
+    )
+    async def toggle_public(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        self.is_public = not self.is_public
+        button.label = f"公開顯示：{'是' if self.is_public else '否'}"
+        button.style = (
+            discord.ButtonStyle.success
+            if self.is_public
+            else discord.ButtonStyle.secondary
+        )
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(
+        label="繼續填寫地點資料",
+        style=discord.ButtonStyle.primary,
+        emoji="✏️",
+        row=3,
+    )
+    async def continue_registration(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if ACADEMY_DB.get_profile(self.owner_id) is None:
+            await interaction.response.send_message(
+                "請先從主面板的「學生資料」完成入學登記。",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_modal(
+            PlaceModal(
+                user_id=self.owner_id,
+                place_type=self.place_type,
+                source_kind=self.source_kind,
+                allow_oracle=self.allow_oracle,
+                is_public=self.is_public,
+            )
+        )
+
+
+class TownHubView(UserOwnedView):
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(owner_id, timeout=900)
+
+    async def _show_place_list(
+        self,
+        interaction: discord.Interaction,
+        places: list[dict[str, Any]],
+        empty_message: str,
+    ) -> None:
+        if not places:
+            await interaction.response.send_message(
+                empty_message,
+                ephemeral=True,
+            )
+            return
+
+        view = PlacesView(places)
+        await interaction.response.edit_message(
+            embed=view.current_embed(),
+            view=view,
+        )
+
+    @discord.ui.button(
+        label="商店街",
+        style=discord.ButtonStyle.success,
+        emoji="🛍️",
+        row=0,
+    )
+    async def shops(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        shop_types = {"商店", "餐館", "書店", "魔藥工房", "診所"}
+        places = [
+            place
+            for place in ACADEMY_DB.list_public_places()
+            if place["place_type"] in shop_types
+        ]
+        await self._show_place_list(
+            interaction,
+            places,
+            "城下町目前還沒有公開營業的店鋪。",
+        )
+
+    @discord.ui.button(
+        label="校外居住地",
+        style=discord.ButtonStyle.primary,
+        emoji="🏠",
+        row=0,
+    )
+    async def residences(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        places = ACADEMY_DB.list_public_places("校外住處")
+        await self._show_place_list(
+            interaction,
+            places,
+            "目前沒有公開的校外居住地。",
+        )
+
+    @discord.ui.button(
+        label="我的地點",
+        style=discord.ButtonStyle.secondary,
+        emoji="📍",
+        row=0,
+    )
+    async def my_places(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=student_places_embed(self.owner_id),
+            view=self,
+        )
+
+    @discord.ui.button(
+        label="登記地點",
+        style=discord.ButtonStyle.secondary,
+        emoji="➕",
+        row=0,
+    )
+    async def register_place(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=monk_embed(
+                "🏘️ 城下町｜地點登記",
+                "先選擇類型與來源，再決定是否公開、是否允許神諭使用。",
+                color=0x8B6F47,
+            ),
+            view=PlaceRegistrationOptionsView(self.owner_id),
+        )
+
+
+async def _send_tutorial(
     interaction: discord.Interaction,
-    類型: app_commands.Choice[str],
-    來源: app_commands.Choice[str],
-    允許神諭使用: bool = True,
-    是否公開: bool = True,
+    tutorial_id: str,
 ) -> None:
-    if ACADEMY_DB.get_profile(interaction.user.id) is None:
+    item = KNOWLEDGE.tutorial_by_id.get(tutorial_id)
+    if not isinstance(item, dict):
         await interaction.response.send_message(
-            "請先完成 `/入學登記`，再登記個人地點。",
+            "這份教學目前無法載入。請通知管理員檢查資料檔案。",
             ephemeral=True,
         )
         return
 
-    await interaction.response.send_modal(
-        PlaceModal(
-            user_id=interaction.user.id,
-            place_type=類型.value,
-            source_kind=來源.value,
-            allow_oracle=允許神諭使用,
-            is_public=是否公開,
-        )
-    )
-
-
-@tree.command(
-    name="我的地點",
-    description="查看自己登記的商店、住處與工作室",
-)
-async def my_places(interaction: discord.Interaction) -> None:
-    places = ACADEMY_DB.list_user_places(interaction.user.id)
-    if not places:
-        await interaction.response.send_message(
-            "目前沒有登記地點。可以使用 `/地點登記` 建立商店、住處或遷入舊企劃。",
-            ephemeral=True,
-        )
-        return
-
-    lines = []
-    for place in places[:20]:
-        lines.append(
-            f"**#{place['id']}｜{place['name']}**\n"
-            f"{place['place_type']}｜{place['status']}｜"
-            f"{'公開' if place['is_public'] else '不公開'}｜"
-            f"{'可進神諭' if place['allow_oracle'] else '不進神諭'}"
-        )
-
+    match = KnowledgeMatch("tutorial", item, item, 100_000)
     await interaction.response.send_message(
         embed=monk_embed(
-            "🏘️ 我的學院街區地點",
-            "\n\n".join(lines),
-            color=0x8B6F47,
+            f"📖 修士教學｜{item.get('title', '教學')}",
+            render_local_reply(match),
         ),
         ephemeral=True,
     )
 
 
-@tree.command(
-    name="學院街區",
-    description="一頁一頁查看學生公開的商店與校外居住地",
-)
-@app_commands.describe(類型="可選擇只查看某一類型")
-@app_commands.choices(類型=PLACE_TYPE_CHOICES)
-async def campus_district(
+async def _handle_teaching_question(
     interaction: discord.Interaction,
-    類型: app_commands.Choice[str] | None = None,
+    question: str,
 ) -> None:
-    places = ACADEMY_DB.list_public_places(
-        類型.value if 類型 else None
-    )
-    if not places:
+    nickname_reply = gorilla_nickname_reply(question)
+    if nickname_reply is not None:
         await interaction.response.send_message(
-            "目前沒有符合條件的公開地點。",
+            nickname_reply,
             ephemeral=True,
         )
         return
 
-    view = PlacesView(places)
+    refused = boundary_reply(question)
+    if refused is not None:
+        await interaction.response.send_message(
+            refused,
+            ephemeral=True,
+        )
+        return
+
+    local_result = await answer_question(KNOWLEDGE, question)
+    if local_result.match is not None:
+        match = local_result.match
+        await interaction.response.send_message(
+            embed=monk_embed(
+                f"📚 {match.tutorial['title']}",
+                render_local_reply(
+                    match,
+                    concise=True,
+                    gentle=is_emotional_distress(question),
+                ),
+                color=0x3BA55D,
+            ),
+            ephemeral=True,
+        )
+        return
+
+    description = (
+        f"{random_line('unknown_question', '「紀錄本裡沒有這題。」')}\n\n"
+        f"{NO_OFFICIAL_DATA}\n\n"
+        "教學查詢只使用本地正式知識庫，不會呼叫 AI。"
+        "請查看最新公告或詢問管理員。"
+    )
     await interaction.response.send_message(
-        embed=view.current_embed(),
-        view=view,
+        embed=monk_embed(
+            "📕 修士查不到答案",
+            description,
+            color=0x992D22,
+        ),
+        ephemeral=True,
     )
 
 
-@tree.command(
-    name="本週神諭",
-    description="建立或查看本週神諭頁面",
-)
-async def current_week_oracle(interaction: discord.Interaction) -> None:
+class TeachingQuestionModal(discord.ui.Modal, title="向赤木學長詢問教學"):
+    question = discord.ui.TextInput(
+        label="想查詢的遊戲問題",
+        style=discord.TextStyle.paragraph,
+        placeholder="例如：我剛加入，應該先上課還是探索？",
+        required=True,
+        min_length=2,
+        max_length=300,
+    )
+
+    async def on_submit(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        await _handle_teaching_question(
+            interaction,
+            str(self.question.value),
+        )
+
+
+class TutorialSelect(discord.ui.Select):
+    def __init__(self) -> None:
+        options = [
+            discord.SelectOption(
+                label=str(item["title"])[:100],
+                value=str(item["id"]),
+                description=str(item.get("summary", ""))[:100] or None,
+            )
+            for item in KNOWLEDGE.tutorials[:25]
+        ]
+        super().__init__(
+            placeholder="選擇一項教學主題",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        await _send_tutorial(interaction, self.values[0])
+
+
+class TeachingHubView(UserOwnedView):
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(owner_id, timeout=900)
+        self.add_item(TutorialSelect())
+
+    @discord.ui.button(
+        label="輸入問題查詢",
+        style=discord.ButtonStyle.primary,
+        emoji="🔎",
+        row=1,
+    )
+    async def ask_question(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.send_modal(
+            TeachingQuestionModal()
+        )
+
+
+async def _handle_confession(
+    interaction: discord.Interaction,
+    content: str,
+) -> None:
+    nickname_reply = gorilla_nickname_reply(content)
+    if nickname_reply is not None:
+        await interaction.response.send_message(
+            nickname_reply,
+            ephemeral=True,
+        )
+        return
+
+    refused = confession_boundary_reply(content)
+    if refused is not None:
+        await interaction.response.send_message(
+            refused,
+            ephemeral=True,
+        )
+        return
+
+    if is_emotional_distress(content):
+        opening = "可以慢慢說，先講現在最需要處理的部分。"
+        verdict = "先處理眼前能做的一步；需要時，也可以找信任的人一起整理。"
+    else:
+        opening = random_line(
+            "confession_opening",
+            "請說重點，我會聽完。",
+        )
+        verdict = random_line(
+            "confession_verdict",
+            "內容收到。接著把能修正的部分做好。",
+        )
+
+    local_description = (
+        f"{opening}\n\n"
+        f"> {discord.utils.escape_markdown(content)}\n\n"
+        f"{verdict}\n\n"
+        "⚠️ **目前是試行版告解**\n"
+        "這項功能只進行角色陪伴，尚未連接神父的正式玩家資料，"
+        "因此不會降低罪惡值。正式處理仍請使用神父的告解功能。"
+    )
+
+    if openai_client is None or not SETTINGS.confession_ai_available:
+        await interaction.response.send_message(
+            embed=monk_embed(
+                "🕯️ 修士告解室｜本地回覆",
+                f"{local_description}\n\n_AI 告解目前未啟用。_",
+                color=0x111111,
+            ),
+            ephemeral=True,
+        )
+        return
+
+    used = get_today_usage(interaction.user.id)
+    if SETTINGS.ai_daily_limit > 0 and used >= SETTINGS.ai_daily_limit:
+        await interaction.response.send_message(
+            embed=monk_embed(
+                "🕯️ 修士告解室｜本地回覆",
+                f"{local_description}\n\n"
+                "_今日 AI 使用次數已用完，先由本地修士回覆。_",
+                color=0x111111,
+            ),
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(
+        thinking=True,
+        ephemeral=True,
+    )
+
+    try:
+        ai_reply = await ask_openai_confession(
+            content,
+            interaction.user.id,
+            interaction.user.display_name,
+        )
+    except Exception:
+        logger.exception("OpenAI API 告解回覆失敗")
+        await interaction.followup.send(
+            embed=monk_embed(
+                "🕯️ 修士告解室｜本地回覆",
+                f"{local_description}\n\n"
+                "_AI 暫時無法回覆；告解內容未寫入玩家資料。_",
+                color=0xFAA61A,
+            ),
+            ephemeral=True,
+        )
+        return
+
+    current_usage = increment_today_usage(interaction.user.id)
+    remaining: int | str = (
+        max(0, SETTINGS.ai_daily_limit - current_usage)
+        if SETTINGS.ai_daily_limit > 0
+        else "不限"
+    )
+    description = (
+        f"{ai_reply}\n\n"
+        "⚠️ **告解陪伴不會修改罪惡值或玩家資料。**\n"
+        "正式罪惡值處理仍請使用神父的告解功能。\n\n"
+        f"_AI 一次性回覆｜今日 AI 使用剩餘：{remaining}_"
+    )
+
+    await interaction.followup.send(
+        embed=monk_embed(
+            "🕯️ 修士告解室｜AI 回覆",
+            description,
+            color=0x111111,
+        ),
+        ephemeral=True,
+    )
+
+
+class ConfessionModal(discord.ui.Modal, title="禊月堂修士告解室"):
+    content = discord.ui.TextInput(
+        label="告解內容",
+        style=discord.TextStyle.paragraph,
+        placeholder="簡短寫下你想整理或坦白的事情。",
+        required=True,
+        min_length=2,
+        max_length=1000,
+    )
+
+    async def on_submit(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        await _handle_confession(
+            interaction,
+            str(self.content.value),
+        )
+
+
+async def _handle_current_week_oracle(
+    interaction: discord.Interaction,
+) -> None:
     profile = ACADEMY_DB.get_profile_bundle(interaction.user.id)
     if profile is None:
         await interaction.response.send_message(
-            "請先使用 `/入學登記` 建立學籍。",
+            "請先從主面板的「學生資料」完成入學登記。",
             ephemeral=True,
         )
         return
@@ -1361,12 +1876,15 @@ async def current_week_oracle(interaction: discord.Interaction) -> None:
         if openai_client is None or not SETTINGS.oracle_ai_available:
             await interaction.response.send_message(
                 "本週尚未建立神諭，而且 AI 神諭目前未啟用。"
-                "請確認 `AI_ORACLE_ENABLED=true` 與 API Key。",
+                "請管理員確認 `AI_ORACLE_ENABLED=true` 與 API Key。",
                 ephemeral=True,
             )
             return
 
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer(
+            thinking=True,
+            ephemeral=True,
+        )
 
         preferences = profile.get("preferences", {})
         all_places = (
@@ -1377,9 +1895,15 @@ async def current_week_oracle(interaction: discord.Interaction) -> None:
         weekly_keywords = select_weekly_keywords(
             user_id=interaction.user.id,
             week_key=week.key,
-            creative_keywords=preferences.get("creative_keywords", ""),
+            creative_keywords=preferences.get(
+                "creative_keywords",
+                "",
+            ),
             liked_themes=preferences.get("liked_themes", ""),
-            preferred_scenes=preferences.get("preferred_scenes", ""),
+            preferred_scenes=preferences.get(
+                "preferred_scenes",
+                "",
+            ),
         )
         weekly_places = select_weekly_places(
             user_id=interaction.user.id,
@@ -1402,7 +1926,8 @@ async def current_week_oracle(interaction: discord.Interaction) -> None:
         except Exception:
             logger.exception("OpenAI API 神諭生成失敗")
             await interaction.followup.send(
-                "本週神諭生成失敗。請稍後再試，或請管理員查看 Railway 紀錄。",
+                "本週神諭生成失敗。請稍後再試，"
+                "或請管理員查看 Railway 紀錄。",
                 ephemeral=True,
             )
             return
@@ -1419,7 +1944,8 @@ async def current_week_oracle(interaction: discord.Interaction) -> None:
 
         pages = ACADEMY_DB.list_oracles(interaction.user.id)
         index = next(
-            i for i, page in enumerate(pages)
+            i
+            for i, page in enumerate(pages)
             if page["id"] == existing_page["id"]
         )
         view = OracleBookView(
@@ -1436,7 +1962,8 @@ async def current_week_oracle(interaction: discord.Interaction) -> None:
 
     pages = ACADEMY_DB.list_oracles(interaction.user.id)
     index = next(
-        i for i, page in enumerate(pages)
+        i
+        for i, page in enumerate(pages)
         if page["id"] == existing_page["id"]
     )
     view = OracleBookView(
@@ -1451,254 +1978,253 @@ async def current_week_oracle(interaction: discord.Interaction) -> None:
     )
 
 
-@tree.command(
-    name="神諭冊",
-    description="一頁一頁查看歷週神諭並標記完成狀態",
-)
-async def oracle_book(interaction: discord.Interaction) -> None:
-    pages = ACADEMY_DB.list_oracles(interaction.user.id)
-    if not pages:
+class OracleHubView(UserOwnedView):
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(owner_id, timeout=900)
+
+    @discord.ui.button(
+        label="本週神諭",
+        style=discord.ButtonStyle.primary,
+        emoji="✨",
+        row=0,
+    )
+    async def current_week(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await _handle_current_week_oracle(interaction)
+
+    @discord.ui.button(
+        label="開啟神諭冊",
+        style=discord.ButtonStyle.success,
+        emoji="📖",
+        row=0,
+    )
+    async def open_book(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        pages = ACADEMY_DB.list_oracles(self.owner_id)
+        if not pages:
+            await interaction.response.send_message(
+                "神諭冊目前是空的。請先按「本週神諭」建立第一頁。",
+                ephemeral=True,
+            )
+            return
+
+        view = OracleBookView(self.owner_id, pages)
+        await interaction.response.edit_message(
+            embed=view.current_embed(),
+            view=view,
+        )
+
+
+class MonkMainPanelView(discord.ui.View):
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+
+    async def interaction_check(
+        self,
+        interaction: discord.Interaction,
+    ) -> bool:
+        if not _component_channel_allowed(interaction):
+            await _reject_wrong_component_channel(interaction)
+            return False
+        return True
+
+    @discord.ui.button(
+        label="學生資料",
+        style=discord.ButtonStyle.primary,
+        emoji="🎓",
+        custom_id="stern_monk:main:student",
+        row=0,
+    )
+    async def student_data(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        profile = ACADEMY_DB.get_profile_bundle(
+            interaction.user.id
+        )
+        if profile is None:
+            await interaction.response.send_message(
+                embed=monk_embed(
+                    "🎓 入學登記",
+                    "尚未建立學籍。先選擇學院與入學年份，"
+                    "再填寫學生資料。",
+                    color=0x5865F2,
+                ),
+                view=EnrollmentSetupView(interaction.user.id),
+                ephemeral=True,
+            )
+            return
+
         await interaction.response.send_message(
-            "神諭冊目前是空的。請先使用 `/本週神諭` 建立第一頁。",
+            embed=student_dashboard_embed(interaction.user.id),
+            view=StudentHubView(interaction.user.id),
             ephemeral=True,
         )
-        return
 
-    view = OracleBookView(interaction.user.id, pages)
-    await interaction.response.send_message(
-        embed=view.current_embed(),
-        view=view,
-        ephemeral=True,
+    @discord.ui.button(
+        label="城下町",
+        style=discord.ButtonStyle.success,
+        emoji="🏘️",
+        custom_id="stern_monk:main:town",
+        row=0,
     )
-
-
-
-@tree.command(
-    name="修士介紹",
-    description="查看赤木修士成為萬年學長的經歷",
-)
-async def monk_introduction(interaction: discord.Interaction) -> None:
-    await interaction.response.send_message(
-        embed=monk_embed(
-            "📜 赤木修士｜萬年學長",
-            MONK_INTRODUCTION,
-            color=0x8B6F47,
-        ),
-    )
-
-
-@tree.command(
-    name="新生指南",
-    description="讓修士告訴你加入學院後該先做什麼",
-)
-async def newcomer_guide(interaction: discord.Interaction) -> None:
-    tutorial = KNOWLEDGE.tutorial_by_id["new_player_flow"]
-    match = KnowledgeMatch("tutorial", tutorial, tutorial, 100_000)
-    description = render_local_reply(match)
-
-    await interaction.response.send_message(
-        embed=monk_embed("📘 新生指南｜修士版", description, color=0x5865F2),
-    )
-
-
-TEACHING_CHOICES = [
-    app_commands.Choice(name=item["title"], value=item["id"])
-    for item in KNOWLEDGE.tutorials
-]
-
-
-@tree.command(
-    name="修士教學",
-    description="選擇一個遊戲系統，查看繁體中文教學",
-)
-@app_commands.describe(主題="你想查看的教學主題")
-@app_commands.choices(主題=TEACHING_CHOICES)
-async def monk_tutorial(
-    interaction: discord.Interaction,
-    主題: app_commands.Choice[str],
-) -> None:
-    item = KNOWLEDGE.tutorial_by_id.get(主題.value)
-
-    if not isinstance(item, dict):
-        await interaction.response.send_message(
-            "這份教學目前無法載入。請通知管理員檢查資料檔案。",
-            ephemeral=True,
-        )
-        return
-
-    match = KnowledgeMatch("tutorial", item, item, 100_000)
-    description = render_local_reply(match)
-
-    await interaction.response.send_message(
-        embed=monk_embed(
-            f"📖 修士教學｜{item.get('title', 主題.name)}",
-            description,
-        ),
-    )
-
-
-@tree.command(
-    name="問修士",
-    description="只查本地 FAQ 與正式教學，不會使用 AI",
-)
-@app_commands.describe(問題="例如：我剛加入，應該先上課還是探索？")
-@app_commands.checks.cooldown(1, 20.0)
-async def ask_monk(
-    interaction: discord.Interaction,
-    問題: app_commands.Range[str, 2, 200],
-) -> None:
-    nickname_reply = gorilla_nickname_reply(問題)
-    if nickname_reply is not None:
-        await interaction.response.send_message(nickname_reply, ephemeral=True)
-        return
-
-    refused = boundary_reply(問題)
-    if refused is not None:
-        await interaction.response.send_message(refused, ephemeral=True)
-        return
-
-    # 固定 FAQ 第一順位，固定教學第二順位；兩者都不會使用 API。
-    local_result = await answer_question(KNOWLEDGE, 問題)
-    if local_result.match is not None:
-        match = local_result.match
+    async def town(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
         await interaction.response.send_message(
             embed=monk_embed(
-                f"📚 {match.tutorial['title']}",
-                render_local_reply(
-                    match,
-                    concise=True,
-                    gentle=is_emotional_distress(問題),
-                ),
+                "🏘️ 禊月堂魔法學院城下町",
+                "查看學生商店街、校外居住地，"
+                "或管理自己登記的店鋪與住所。",
+                color=0x8B6F47,
+            ),
+            view=TownHubView(interaction.user.id),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="神諭冊",
+        style=discord.ButtonStyle.primary,
+        emoji="📖",
+        custom_id="stern_monk:main:oracle",
+        row=0,
+    )
+    async def oracle(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.send_message(
+            embed=monk_embed(
+                "📖 禊月堂個人神諭冊",
+                "領取本週神諭，或翻閱過去頁面並標記完成狀態。",
+                color=0x7A5AC8,
+            ),
+            view=OracleHubView(interaction.user.id),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="教學",
+        style=discord.ButtonStyle.secondary,
+        emoji="📚",
+        custom_id="stern_monk:main:teaching",
+        row=1,
+    )
+    async def teaching(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.send_message(
+            embed=monk_embed(
+                "📚 赤木學長教學櫃臺",
+                "從選單挑選正式教學，"
+                "或按下「輸入問題查詢」搜尋本地 FAQ。",
                 color=0x3BA55D,
             ),
+            view=TeachingHubView(interaction.user.id),
+            ephemeral=True,
         )
-        return
 
-    description = (
-        f"{random_line('unknown_question', '「紀錄本裡沒有這題。」')}\n\n"
-        f"{NO_OFFICIAL_DATA}\n\n"
-        "教學查詢只使用本地正式知識庫，不會呼叫 AI。請查看最新公告或詢問管理員。"
+    @discord.ui.button(
+        label="告解",
+        style=discord.ButtonStyle.secondary,
+        emoji="🕯️",
+        custom_id="stern_monk:main:confession",
+        row=1,
     )
-
-    await interaction.response.send_message(
-        embed=monk_embed("📕 修士查不到答案", description, color=0x992D22),
-        ephemeral=True,
-    )
+    async def confession(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.send_modal(
+            ConfessionModal()
+        )
 
 
 @tree.command(
-    name="修士告解",
-    description="向修士進行 AI 告解陪伴；不會修改正式罪惡值",
+    name="建立修士面板",
+    description="由管理員建立固定的修士功能面板",
 )
-@app_commands.describe(內容="簡短寫下你想告解的內容")
-async def monk_confession(
+@app_commands.default_permissions(manage_guild=True)
+async def create_monk_panel(
     interaction: discord.Interaction,
-    內容: app_commands.Range[str, 2, 300],
 ) -> None:
-    nickname_reply = gorilla_nickname_reply(內容)
-    if nickname_reply is not None:
-        await interaction.response.send_message(nickname_reply, ephemeral=True)
-        return
-
-    refused = confession_boundary_reply(內容)
-    if refused is not None:
-        await interaction.response.send_message(refused, ephemeral=True)
-        return
-
-    if is_emotional_distress(內容):
-        opening = "可以慢慢說，先講現在最需要處理的部分。"
-        verdict = "先處理眼前能做的一步；需要時，也可以找信任的人一起整理。"
-    else:
-        opening = random_line("confession_opening", "請說重點，我會聽完。")
-        verdict = random_line("confession_verdict", "內容收到。接著把能修正的部分做好。")
-
-    local_description = (
-        f"{opening}\n\n"
-        f"> {discord.utils.escape_markdown(內容)}\n\n"
-        f"{verdict}\n\n"
-        "⚠️ **目前是試行版告解**\n"
-        "這個指令只進行角色演出，尚未連接神父的正式玩家資料，"
-        "因此不會降低罪惡值。正式處理仍請使用神父的告解功能。"
+    permissions = getattr(
+        interaction.user,
+        "guild_permissions",
+        None,
     )
-
-    if openai_client is None or not SETTINGS.confession_ai_available:
+    if permissions is None or not permissions.manage_guild:
         await interaction.response.send_message(
-            embed=monk_embed(
-                "🕯️ 修士告解室｜本地回覆",
-                f"{local_description}\n\n_AI 告解目前未啟用。_",
-                color=0x111111,
-            ),
+            "只有具有「管理伺服器」權限的管理員能建立面板。",
             ephemeral=True,
         )
         return
 
-    used = get_today_usage(interaction.user.id)
-    if SETTINGS.ai_daily_limit > 0 and used >= SETTINGS.ai_daily_limit:
-        await interaction.response.send_message(
-            embed=monk_embed(
-                "🕯️ 修士告解室｜本地回覆",
-                f"{local_description}\n\n_今日 AI 使用次數已用完，先由本地修士回覆。_",
-                color=0x111111,
-            ),
-            ephemeral=True,
-        )
-        return
-
-    await interaction.response.defer(thinking=True, ephemeral=True)
-
-    try:
-        ai_reply = await ask_openai_confession(
-            內容,
-            interaction.user.id,
-            interaction.user.display_name,
-        )
-    except Exception:
-        logger.exception("OpenAI API 告解回覆失敗")
-        await interaction.followup.send(
-            embed=monk_embed(
-                "🕯️ 修士告解室｜本地回覆",
-                f"{local_description}\n\n_AI 暫時無法回覆；告解內容未寫入玩家資料。_",
-                color=0xFAA61A,
-            ),
-            ephemeral=True,
-        )
-        return
-
-    current_usage = increment_today_usage(interaction.user.id)
-    remaining = (
-        max(0, SETTINGS.ai_daily_limit - current_usage)
-        if SETTINGS.ai_daily_limit > 0
-        else "不限"
+    embed = monk_embed(
+        "◆ 禊月堂修士教室",
+        "赤木修士正在整理學生資料與本週紀錄。\n\n"
+        "請使用下方按鈕進入對應功能：\n"
+        "・學生資料：入學登記、學籍、神諭偏好\n"
+        "・城下町：商店街、校外住處、地點登記\n"
+        "・神諭冊：本週神諭與完成紀錄\n"
+        "・教學：正式遊戲教學與 FAQ\n"
+        "・告解：一次性陪伴，不修改正式罪惡值",
+        color=0x8B6F47,
     )
-    description = (
-        f"{ai_reply}\n\n"
-        "⚠️ **告解陪伴不會修改罪惡值或玩家資料。**\n"
-        "正式罪惡值處理仍請使用神父的告解功能。\n\n"
-        f"_AI 一次性回覆｜今日 AI 使用剩餘：{remaining}_"
+    embed.set_footer(
+        text="個人資料與告解內容只會私密顯示給操作者本人。"
     )
 
-    await interaction.followup.send(
-        embed=monk_embed("🕯️ 修士告解室｜AI 回覆", description, color=0x111111),
-        ephemeral=True,
+    await interaction.response.send_message(
+        embed=embed,
+        view=MonkMainPanelView(),
     )
 
 
 @tree.command(
     name="修士狀態",
-    description="確認修士是否正常運作",
+    description="由管理員確認修士服務是否正常",
 )
-async def monk_status(interaction: discord.Interaction) -> None:
-    confession_ai_status = "已啟用" if SETTINGS.confession_ai_available else "未啟用"
-    oracle_ai_status = "已啟用" if SETTINGS.oracle_ai_available else "未啟用"
+@app_commands.default_permissions(manage_guild=True)
+async def monk_status(
+    interaction: discord.Interaction,
+) -> None:
+    confession_ai_status = (
+        "已啟用"
+        if SETTINGS.confession_ai_available
+        else "未啟用"
+    )
+    oracle_ai_status = (
+        "已啟用"
+        if SETTINGS.oracle_ai_available
+        else "未啟用"
+    )
     await interaction.response.send_message(
-        "修士目前在線，教學與規則查詢可正常使用。\n\n"
+        "修士目前在線。\n\n"
+        "玩家操作方式：**固定功能面板**\n"
+        "公開斜線指令數量：**2**\n"
         "AI 教學：**永久停用**\n"
         f"AI 告解：**{confession_ai_status}**\n"
         f"AI 神諭：**{oracle_ai_status}**\n"
-        f"學籍資料庫：**已啟用**\n"
+        "學籍資料庫：**已啟用**\n"
         f"指定頻道：<#{SETTINGS.monk_channel_id}>",
         ephemeral=True,
     )
+
+
 
 
 @tree.error
