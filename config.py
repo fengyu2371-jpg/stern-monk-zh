@@ -54,6 +54,7 @@ class Settings:
     openai_api_key: str
     openai_model: str
     ai_daily_limit: int
+    oracle_weekly_limit: int
     ai_max_output_tokens: int
     oracle_max_output_tokens: int
     monk_db_path: str
@@ -74,7 +75,10 @@ class Settings:
     def from_mapping(cls, values: Mapping[str, str]) -> "Settings":
         guild_id = _read_int(values, "GUILD_ID", None, minimum=1)
         monk_channel_id = _read_int(values, "MONK_CHANNEL_ID", None, minimum=1)
-        ai_daily_limit = _read_int(values, "AI_DAILY_LIMIT", 5, minimum=0)
+        ai_daily_limit = _read_int(values, "AI_DAILY_LIMIT", 1, minimum=1)
+        oracle_weekly_limit = _read_int(
+            values, "ORACLE_WEEKLY_LIMIT", 3, minimum=1
+        )
         ai_max_output_tokens = _read_int(
             values, "AI_MAX_OUTPUT_TOKENS", 180, minimum=50
         )
@@ -97,6 +101,7 @@ class Settings:
             openai_model=str(values.get("OPENAI_MODEL", "gpt-5-nano")).strip()
             or "gpt-5-nano",
             ai_daily_limit=int(ai_daily_limit),
+            oracle_weekly_limit=int(oracle_weekly_limit),
             ai_max_output_tokens=int(ai_max_output_tokens),
             oracle_max_output_tokens=int(oracle_max_output_tokens),
             monk_db_path=str(

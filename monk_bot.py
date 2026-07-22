@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import random
-from collections import defaultdict
-from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +10,7 @@ import discord
 from discord import app_commands
 from openai import AsyncOpenAI
 
-from academy_db import AcademyDatabase, month_week_info
+from academy_db import AcademyDatabase, month_week_info, taipei_today
 from confession import (
     CONFESSION_AI_INSTRUCTIONS,
     build_confession_input,
@@ -96,75 +94,8 @@ elif SETTINGS.ai_enabled:
         logger.info("AI 總開關已啟用，但告解 AI 目前為關閉。")
 
 
-# 第一版採記憶體計數，Railway 重啟或重新部署後會歸零。
-_ai_usage: dict[str, dict[int, int]] = defaultdict(dict)
-
-
-def monk_embed(
-    title: str,
-    description: str,
-    *,
-    color: int = 0x2B2D31,
-) -> discord.Embed:
-    return discord.Embed(
-        title=title,
-        description=description,
-        color=color,
-    )
-
-
-def knowledge_source_label(match: KnowledgeMatch) -> str:
-    source_type = "固定 FAQ" if match.kind == "faq" else "固定教學"
-    return f"知識庫來源：{source_type}｜{match.tutorial['title']}"
-
-
-def roleplay_lines(match: KnowledgeMatch) -> tuple[str, str]:
-    tutorial = match.tutorial
-    return (
-        random.choice(tutorial["monk_openings"]),
-        random.choice(tutorial["monk_endings"]),
-    )
-
-
-def render_local_reply(
-    match: KnowledgeMatch,
-    *,
-    concise: bool = False,
-    gentle: bool = False,
-) -> str:
-    answer = render_knowledge_answer(match, concise=concise)
-    source = f"_{knowledge_source_label(match)}_"
-    if gentle:
-        return f"{answer}\n\n先照正確做法處理；若畫面仍不同，保留截圖詢問管理員。\n\n{source}"
-
-    opening, ending = roleplay_lines(match)
-    return f"{opening}\n\n{answer}\n\n{ending}\n\n{source}"
-
-
-def random_line(category: str, fallback: str) -> str:
-    lines = DIALOGUE.get(category, [])
-    if not isinstance(lines, list):
-        return fallback
-
-    valid_lines = [line for line in lines if isinstance(line, str) and line.strip()]
-    return random.choice(valid_lines) if valid_lines else fallback
-
-
-def get_today_usage(user_id: int) -> int:
-    today_key = date.today().isoformat()
-    return _ai_usage[today_key].get(user_id, 0)
-
-
-def increment_today_usage(user_id: int) -> int:
-    today_key = date.today().isoformat()
-
-    # 清掉舊日期，避免記憶體一直累積。
-    for old_key in list(_ai_usage.keys()):
-        if old_key != today_key:
-            del _ai_usage[old_key]
-
-    _ai_usage[today_key][user_id] = _ai_usage[today_key].get(user_id, 0) + 1
-    return _ai_usage[today_key][user_id]
+CONFESSION_USAGE_SCOPE = "confession_day"
+ORACLE_USAGE_SCOPE = "oracle_week"
 
 
 async def ask_openai_confession(
@@ -242,11 +173,12 @@ class MonkClient(discord.Client):
         )
         logger.info("修士已上線：%s（%s）", self.user, self.user.id)
         logger.info(
-            "AI 教學：永久停用｜AI 告解：%s｜AI 神諭：%s｜模型：%s｜每日每人上限：%s",
+            "AI 教學：永久停用｜AI 告解：%s｜AI 神諭：%s｜模型：%s｜告解每日上限：%s｜神諭每週上限：%s",
             "啟用" if SETTINGS.confession_ai_available else "停用",
             "啟用" if SETTINGS.oracle_ai_available else "停用",
             SETTINGS.openai_model,
             SETTINGS.ai_daily_limit,
+            SETTINGS.oracle_weekly_limit,
         )
         logger.info("修士允許回覆頻道：%s", SETTINGS.monk_channel_id)
 
@@ -848,7 +780,7 @@ class OracleBookView(UserOwnedView):
             embed=monk_embed(
                 "⚠️ 確認刪除神諭",
                 f"即將刪除 **{page['week_label']}** 的這一頁神諭。\\n\\n"
-                "刪除後無法復原，但可以再抽一頁新的測試神諭。",
+                "刪除後無法復原，也不會退還本週抽取次數。",
                 color=0xED4245,
             ),
             view=OracleDeleteConfirmView(
@@ -897,7 +829,7 @@ class OracleDeleteConfirmView(UserOwnedView):
             await interaction.response.edit_message(
                 embed=monk_embed(
                     "📖 神諭冊目前是空的",
-                    "這一頁已刪除。測試期間可以按「抽取新神諭」重新建立。",
+                    "這一頁已刪除；本週剩餘抽取次數不會因此增加。",
                     color=0x7A5AC8,
                 ),
                 view=OracleHubView(self.owner_id),
@@ -956,9 +888,10 @@ def student_dashboard_embed(user_id: int) -> discord.Embed:
     places = ACADEMY_DB.list_user_places(user_id)
     pages = ACADEMY_DB.list_oracles(user_id)
     current_week = month_week_info()
-    current_count = ACADEMY_DB.count_oracles_by_week(
-        user_id,
-        current_week.key,
+    current_count = ACADEMY_DB.get_usage_count(
+        user_id=user_id,
+        usage_scope=ORACLE_USAGE_SCOPE,
+        period_key=current_week.key,
     )
 
     embed = monk_embed(
@@ -992,7 +925,8 @@ def student_dashboard_embed(user_id: int) -> discord.Embed:
         name="📖 神諭冊",
         value=(
             f"目前共有 **{len(pages)}** 頁。\n"
-            f"本週 `{current_week.label}`：已建立 **{current_count}** 頁"
+            f"本週 `{current_week.label}`：已抽 **{current_count}／"
+            f"{SETTINGS.oracle_weekly_limit}** 次"
         ),
         inline=True,
     )
@@ -2049,13 +1983,20 @@ async def _handle_confession(
         )
         return
 
-    used = get_today_usage(interaction.user.id)
-    if SETTINGS.ai_daily_limit > 0 and used >= SETTINGS.ai_daily_limit:
+    usage_date = taipei_today().isoformat()
+    reserved_usage = ACADEMY_DB.try_reserve_usage(
+        user_id=interaction.user.id,
+        usage_scope=CONFESSION_USAGE_SCOPE,
+        period_key=usage_date,
+        limit=SETTINGS.ai_daily_limit,
+    )
+    if reserved_usage is None:
         await interaction.response.send_message(
             embed=monk_embed(
                 "🕯️ 修士告解室｜本地回覆",
                 f"{local_description}\n\n"
-                "_今日 AI 使用次數已用完，先由本地修士回覆。_",
+                f"_今日告解已達 {SETTINGS.ai_daily_limit} 次上限，"
+                "先由本地修士回覆。_",
                 color=0x111111,
             ),
             ephemeral=True,
@@ -2074,6 +2015,11 @@ async def _handle_confession(
             interaction.user.display_name,
         )
     except Exception:
+        ACADEMY_DB.release_usage(
+            user_id=interaction.user.id,
+            usage_scope=CONFESSION_USAGE_SCOPE,
+            period_key=usage_date,
+        )
         logger.exception("OpenAI API 告解回覆失敗")
         await interaction.followup.send(
             embed=monk_embed(
@@ -2086,11 +2032,9 @@ async def _handle_confession(
         )
         return
 
-    current_usage = increment_today_usage(interaction.user.id)
-    remaining: int | str = (
-        max(0, SETTINGS.ai_daily_limit - current_usage)
-        if SETTINGS.ai_daily_limit > 0
-        else "不限"
+    remaining = max(
+        0,
+        SETTINGS.ai_daily_limit - reserved_usage,
     )
     description = (
         f"{ai_reply}\n\n"
@@ -2149,13 +2093,26 @@ async def _handle_current_week_oracle(
         return
 
     week = month_week_info()
-    draw_number = (
-        ACADEMY_DB.count_oracles_by_week(
-            interaction.user.id,
-            week.key,
-        )
-        + 1
+    reserved_draw = ACADEMY_DB.try_reserve_usage(
+        user_id=interaction.user.id,
+        usage_scope=ORACLE_USAGE_SCOPE,
+        period_key=week.key,
+        limit=SETTINGS.oracle_weekly_limit,
     )
+    if reserved_draw is None:
+        await interaction.response.send_message(
+            embed=monk_embed(
+                "📖 本週神諭已抽完",
+                f"`{week.label}` 每位學生最多抽取 "
+                f"**{SETTINGS.oracle_weekly_limit} 次**。\n\n"
+                "刪除神諭只會整理神諭冊，不會退還抽取次數。",
+                color=0x7A5AC8,
+            ),
+            ephemeral=True,
+        )
+        return
+
+    draw_number = reserved_draw
     selection_key = f"{week.key}:draw:{draw_number}"
 
     await interaction.response.defer(
@@ -2199,6 +2156,11 @@ async def _handle_current_week_oracle(
             weekly_keywords=weekly_keywords,
         )
     except Exception:
+        ACADEMY_DB.release_usage(
+            user_id=interaction.user.id,
+            usage_scope=ORACLE_USAGE_SCOPE,
+            period_key=week.key,
+        )
         logger.exception("OpenAI API 神諭生成失敗")
         await interaction.followup.send(
             "神諭生成失敗。請稍後再試，"
@@ -2363,7 +2325,7 @@ class MonkMainPanelView(discord.ui.View):
         await interaction.response.send_message(
             embed=monk_embed(
                 "📖 禊月堂個人神諭冊",
-                "測試期間可不限次數抽取神諭，並翻閱、標記或刪除頁面。",
+                "每位學生每週可抽 3 次神諭，並翻閱、標記或刪除頁面。",
                 color=0x7A5AC8,
             ),
             view=OracleHubView(interaction.user.id),

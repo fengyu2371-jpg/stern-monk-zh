@@ -6,7 +6,15 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from typing import Any
+
+
+TAIPEI_TIMEZONE = ZoneInfo("Asia/Taipei")
+
+
+def taipei_today() -> date:
+    return datetime.now(TAIPEI_TIMEZONE).date()
 
 
 @dataclass(frozen=True)
@@ -21,7 +29,7 @@ class WeekInfo:
 
 
 def month_week_info(target: date | None = None) -> WeekInfo:
-    current = target or date.today()
+    current = target or taipei_today()
     week_index = ((current.day - 1) // 7) + 1
     start_day = ((week_index - 1) * 7) + 1
     last_day = calendar.monthrange(current.year, current.month)[1]
@@ -202,9 +210,47 @@ class AcademyDatabase:
 
                 CREATE INDEX IF NOT EXISTS idx_oracle_pages_user_week
                 ON oracle_pages(user_id, year, month, week_index);
+
+                CREATE TABLE IF NOT EXISTS usage_counters (
+                    user_id TEXT NOT NULL,
+                    usage_scope TEXT NOT NULL,
+                    period_key TEXT NOT NULL,
+                    used_count INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, usage_scope, period_key)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_usage_counters_period
+                ON usage_counters(usage_scope, period_key);
                 """
             )
             self._migrate_oracle_pages_for_unlimited_draws(conn)
+
+            # 既有神諭頁面回填成已使用抽取次數。
+            # 刪除神諭頁面不會退還抽取次數，避免以刪除方式無限重抽。
+            conn.execute(
+                """
+                INSERT INTO usage_counters (
+                    user_id, usage_scope, period_key, used_count, updated_at
+                )
+                SELECT
+                    user_id,
+                    'oracle_week',
+                    week_key,
+                    COUNT(*),
+                    ?
+                FROM oracle_pages
+                GROUP BY user_id, week_key
+                ON CONFLICT(user_id, usage_scope, period_key)
+                DO UPDATE SET
+                    used_count = MAX(
+                        usage_counters.used_count,
+                        excluded.used_count
+                    ),
+                    updated_at = excluded.updated_at
+                """,
+                (utc_now_iso(),),
+            )
 
             # v12：所有學生自建地點都能作為該玩家的神諭素材。
             # 保留 allow_oracle 欄位以相容舊資料，但值統一為 1。
@@ -217,6 +263,132 @@ class AcademyDatabase:
     @staticmethod
     def _row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
         return dict(row) if row is not None else None
+
+    def get_usage_count(
+        self,
+        *,
+        user_id: int,
+        usage_scope: str,
+        period_key: str,
+    ) -> int:
+        with closing(self.connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT used_count
+                FROM usage_counters
+                WHERE user_id = ?
+                  AND usage_scope = ?
+                  AND period_key = ?
+                """,
+                (str(user_id), usage_scope, period_key),
+            ).fetchone()
+        return int(row["used_count"] if row is not None else 0)
+
+    def try_reserve_usage(
+        self,
+        *,
+        user_id: int,
+        usage_scope: str,
+        period_key: str,
+        limit: int,
+    ) -> int | None:
+        if limit < 1:
+            raise ValueError("使用次數上限至少必須是 1。")
+
+        now = utc_now_iso()
+        with closing(self.connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT used_count
+                FROM usage_counters
+                WHERE user_id = ?
+                  AND usage_scope = ?
+                  AND period_key = ?
+                """,
+                (str(user_id), usage_scope, period_key),
+            ).fetchone()
+            current = int(row["used_count"] if row is not None else 0)
+            if current >= limit:
+                conn.rollback()
+                return None
+
+            updated = current + 1
+            conn.execute(
+                """
+                INSERT INTO usage_counters (
+                    user_id, usage_scope, period_key, used_count, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, usage_scope, period_key)
+                DO UPDATE SET
+                    used_count = excluded.used_count,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    str(user_id),
+                    usage_scope,
+                    period_key,
+                    updated,
+                    now,
+                ),
+            )
+            conn.commit()
+        return updated
+
+    def release_usage(
+        self,
+        *,
+        user_id: int,
+        usage_scope: str,
+        period_key: str,
+    ) -> int:
+        now = utc_now_iso()
+        with closing(self.connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT used_count
+                FROM usage_counters
+                WHERE user_id = ?
+                  AND usage_scope = ?
+                  AND period_key = ?
+                """,
+                (str(user_id), usage_scope, period_key),
+            ).fetchone()
+            current = int(row["used_count"] if row is not None else 0)
+
+            if current <= 1:
+                conn.execute(
+                    """
+                    DELETE FROM usage_counters
+                    WHERE user_id = ?
+                      AND usage_scope = ?
+                      AND period_key = ?
+                    """,
+                    (str(user_id), usage_scope, period_key),
+                )
+                remaining = 0
+            else:
+                remaining = current - 1
+                conn.execute(
+                    """
+                    UPDATE usage_counters
+                    SET used_count = ?, updated_at = ?
+                    WHERE user_id = ?
+                      AND usage_scope = ?
+                      AND period_key = ?
+                    """,
+                    (
+                        remaining,
+                        now,
+                        str(user_id),
+                        usage_scope,
+                        period_key,
+                    ),
+                )
+            conn.commit()
+        return remaining
 
     def save_profile(
         self,
