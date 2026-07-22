@@ -216,6 +216,10 @@ class MonkClient(discord.Client):
     async def setup_hook(self) -> None:
         ACADEMY_DB.initialize()
         logger.info("修士學籍資料庫已初始化：%s", SETTINGS.monk_db_path)
+
+        # 重新註冊固定面板，讓 Railway 重啟後舊訊息上的按鈕仍可使用。
+        self.add_view(StudentDataPanelView())
+        logger.info("學生資料中心 Persistent View 已註冊。")
         if SETTINGS.guild_id is not None:
             guild = discord.Object(id=SETTINGS.guild_id)
             self.tree.copy_global_to(guild=guild)
@@ -838,6 +842,287 @@ class OracleBookView(UserOwnedView):
             embed=self.current_embed(),
             view=self,
         )
+
+
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    cleaned = str(text or "").strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[: limit - 1].rstrip()}…"
+
+
+def student_dashboard_embed(user_id: int) -> discord.Embed:
+    profile = ACADEMY_DB.get_profile_bundle(user_id)
+    if profile is None:
+        return monk_embed(
+            "🎓 禊月堂學生資料中心",
+            "目前尚未建立學籍。\n\n"
+            "請先使用 `/入學登記` 填寫入學資料；完成後再回來按這顆按鈕。",
+            color=0x5865F2,
+        )
+
+    preferences = profile.get("preferences", {})
+    places = ACADEMY_DB.list_user_places(user_id)
+    pages = ACADEMY_DB.list_oracles(user_id)
+    current_week = month_week_info()
+    current_page = ACADEMY_DB.get_oracle_by_week(user_id, current_week.key)
+
+    current_status = (
+        current_page["status"]
+        if current_page is not None
+        else "本週尚未建立"
+    )
+
+    embed = monk_embed(
+        "🎓 我的學生資料總覽",
+        f"**學生姓名**：{profile.get('student_name') or '未填寫'}\n"
+        f"**希望稱呼**：{profile.get('preferred_name') or '未填寫'}\n"
+        f"**所屬學院**：{profile.get('house') or '尚未分院'}\n"
+        f"**主修方向**：{profile.get('major') or '未填寫'}\n"
+        f"**入學年份**：{profile.get('enrollment_year') or '未填寫'}\n"
+        f"**固定同行者**：{profile.get('companion_name') or '未設定'}",
+        color=0x5865F2,
+    )
+
+    preference_lines = (
+        f"喜歡：{preferences.get('liked_themes') or '未設定'}\n"
+        f"避免：{preferences.get('avoided_topics') or '未設定'}\n"
+        f"創作關鍵字：{preferences.get('creative_keywords') or '未設定'}\n"
+        f"偏好場景：{preferences.get('preferred_scenes') or '未設定'}\n"
+        f"允許使用個人地點："
+        f"{'是' if preferences.get('allow_place_context', 1) else '否'}"
+    )
+    embed.add_field(
+        name="🔮 神諭偏好",
+        value=_truncate_text(preference_lines, 1024),
+        inline=False,
+    )
+    embed.add_field(
+        name="🏘️ 學院街區",
+        value=f"已登記 **{len(places)}** 個商店、住處或其他地點。",
+        inline=True,
+    )
+    embed.add_field(
+        name="📖 神諭冊",
+        value=(
+            f"目前共有 **{len(pages)}** 頁。\n"
+            f"本週 `{current_week.label}`：**{current_status}**"
+        ),
+        inline=True,
+    )
+    embed.set_footer(text="此頁為私密資料，只有按下按鈕的本人看得到。")
+    return embed
+
+
+def student_preferences_embed(user_id: int) -> discord.Embed:
+    preferences = ACADEMY_DB.get_preferences(user_id)
+    if preferences is None:
+        return monk_embed(
+            "🔮 我的神諭偏好",
+            "目前尚未設定神諭偏好。\n\n"
+            "可以使用 `/神諭偏好` 補充喜歡的題材、避免內容與創作關鍵字。",
+            color=0x7A5AC8,
+        )
+
+    return monk_embed(
+        "🔮 我的神諭偏好",
+        f"**喜歡的題材與氣氛**\n"
+        f"{preferences.get('liked_themes') or '未設定'}\n\n"
+        f"**希望避免的題材**\n"
+        f"{preferences.get('avoided_topics') or '未設定'}\n\n"
+        f"**可使用的創作關鍵字**\n"
+        f"{preferences.get('creative_keywords') or '未設定'}\n\n"
+        f"**偏好場景**\n"
+        f"{preferences.get('preferred_scenes') or '未設定'}\n\n"
+        f"**允許神諭使用個人地點**："
+        f"{'是' if preferences.get('allow_place_context', 1) else '否'}",
+        color=0x7A5AC8,
+    )
+
+
+def student_places_embed(user_id: int) -> discord.Embed:
+    places = ACADEMY_DB.list_user_places(user_id)
+    if not places:
+        return monk_embed(
+            "🏘️ 我的學院街區地點",
+            "目前沒有登記地點。\n\n"
+            "可以使用 `/地點登記` 建立商店、校外住處、工作室，"
+            "或把過去企劃中的店面遷入學院街區。",
+            color=0x8B6F47,
+        )
+
+    lines: list[str] = []
+    for place in places[:15]:
+        lines.append(
+            f"**#{place['id']}｜{place['name']}**\n"
+            f"{place['place_type']}｜{place['status']}｜"
+            f"{'公開' if place['is_public'] else '不公開'}｜"
+            f"{'可進神諭' if place['allow_oracle'] else '不進神諭'}"
+        )
+
+    remaining = len(places) - 15
+    if remaining > 0:
+        lines.append(f"……另有 {remaining} 個地點未顯示。")
+
+    return monk_embed(
+        "🏘️ 我的學院街區地點",
+        _truncate_text("\n\n".join(lines), 4000),
+        color=0x8B6F47,
+    )
+
+
+class StudentPrivateMenuView(UserOwnedView):
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(owner_id, timeout=900)
+
+    @discord.ui.button(
+        label="學籍總覽",
+        style=discord.ButtonStyle.primary,
+        emoji="🎓",
+    )
+    async def show_profile(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=student_dashboard_embed(self.owner_id),
+            view=self,
+        )
+
+    @discord.ui.button(
+        label="神諭偏好",
+        style=discord.ButtonStyle.secondary,
+        emoji="🔮",
+    )
+    async def show_preferences(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=student_preferences_embed(self.owner_id),
+            view=self,
+        )
+
+    @discord.ui.button(
+        label="我的地點",
+        style=discord.ButtonStyle.secondary,
+        emoji="🏘️",
+    )
+    async def show_places(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=student_places_embed(self.owner_id),
+            view=self,
+        )
+
+    @discord.ui.button(
+        label="開啟神諭冊",
+        style=discord.ButtonStyle.success,
+        emoji="📖",
+    )
+    async def open_oracle_book(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        pages = ACADEMY_DB.list_oracles(self.owner_id)
+        if not pages:
+            await interaction.response.send_message(
+                "神諭冊目前是空的。請先使用 `/本週神諭` 建立第一頁。",
+                ephemeral=True,
+            )
+            return
+
+        oracle_view = OracleBookView(self.owner_id, pages)
+        await interaction.response.send_message(
+            embed=oracle_view.current_embed(),
+            view=oracle_view,
+            ephemeral=True,
+        )
+
+
+class StudentDataPanelView(discord.ui.View):
+    """公開固定面板；每次互動都依按鈕操作者查詢私密資料。"""
+
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="查看我的學生資料",
+        style=discord.ButtonStyle.primary,
+        emoji="📚",
+        custom_id="stern_monk:student_data:view_my_profile",
+    )
+    async def view_my_profile(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if not is_allowed_channel(
+            interaction.channel_id,
+            SETTINGS.monk_channel_id,
+        ):
+            await interaction.response.send_message(
+                f"學生資料面板只能在 <#{SETTINGS.monk_channel_id}> 使用。",
+                ephemeral=True,
+            )
+            return
+
+        profile = ACADEMY_DB.get_profile_bundle(interaction.user.id)
+        if profile is None:
+            await interaction.response.send_message(
+                embed=student_dashboard_embed(interaction.user.id),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            embed=student_dashboard_embed(interaction.user.id),
+            view=StudentPrivateMenuView(interaction.user.id),
+            ephemeral=True,
+        )
+
+
+@tree.command(
+    name="建立學生資料面板",
+    description="由管理員建立固定的學生資料查看按鈕",
+)
+@app_commands.default_permissions(manage_guild=True)
+async def create_student_data_panel(
+    interaction: discord.Interaction,
+) -> None:
+    member = interaction.user
+    permissions = getattr(member, "guild_permissions", None)
+    if permissions is None or not permissions.manage_guild:
+        await interaction.response.send_message(
+            "只有具有「管理伺服器」權限的管理員能建立這個面板。",
+            ephemeral=True,
+        )
+        return
+
+    embed = monk_embed(
+        "🎓 禊月堂學生資料中心",
+        "按下下方按鈕，即可查看自己保存的：\n\n"
+        "・入學學籍與希望稱呼\n"
+        "・神諭偏好與避免題材\n"
+        "・個人商店、住處與工作室\n"
+        "・神諭冊頁數與本週完成狀態\n\n"
+        "**查詢結果只會私密顯示給按鈕操作者本人。**",
+        color=0x5865F2,
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        view=StudentDataPanelView(),
+    )
+
 
 
 @tree.command(
