@@ -218,7 +218,7 @@ class LimitAndOwnershipCodeTests(unittest.TestCase):
 
     def test_owner_guard_rejects_other_players(self) -> None:
         self.assertIn(
-            "這份資料屬於其他學生，不能代替操作。",
+            "不能代替操作",
             self.source,
         )
 

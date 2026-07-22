@@ -40,7 +40,7 @@ class RuntimeHelperRegressionTests(unittest.TestCase):
             and node.name == "create_monk_panel"
         )
         rendered = ast.unparse(command)
-        self.assertIn("monk_embed(", rendered)
+        self.assertIn("main_panel_embed(", rendered)
 
 
 if __name__ == "__main__":

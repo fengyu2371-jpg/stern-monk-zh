@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import random
@@ -110,6 +111,163 @@ def monk_embed(
         description=description,
         color=color,
     )
+
+
+PANEL_SESSION_TIMEOUT_SECONDS = 600
+
+
+def main_panel_embed(*, notice: str = "") -> discord.Embed:
+    description = (
+        "赤木修士正在整理學生資料與本週紀錄。\n\n"
+        "請使用下方按鈕進入對應功能：\n"
+        "・學生資料：入學登記、學籍、神諭偏好、地點管理\n"
+        "・城下町：商店街、校外住處、地點登記\n"
+        "・神諭冊：本週神諭與完成紀錄\n"
+        "・教學：正式遊戲教學與 FAQ\n"
+        "・告解：一次性陪伴，不修改正式罪惡值"
+    )
+    if notice:
+        description += f"\n\n🔒 {notice}"
+
+    embed = monk_embed(
+        "◆ 禊月堂修士教室",
+        description,
+        color=0x8B6F47,
+    )
+    embed.set_footer(
+        text=(
+            "按下功能後會直接切換此訊息。"
+            "操作畫面只限開啟者使用，10 分鐘未操作會自動鎖定並返回主面板。"
+        )
+    )
+    return embed
+
+
+class PanelSession:
+    def __init__(
+        self,
+        *,
+        owner_id: int,
+        owner_name: str,
+        message: discord.Message,
+    ) -> None:
+        self.owner_id = int(owner_id)
+        self.owner_name = owner_name
+        self.message = message
+        self.timeout_task: asyncio.Task[None] | None = None
+
+    def touch(self) -> None:
+        task = self.timeout_task
+        if task is not None and not task.done():
+            task.cancel()
+        self.timeout_task = asyncio.create_task(self._expire())
+
+    async def _expire(self) -> None:
+        try:
+            await asyncio.sleep(PANEL_SESSION_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            return
+
+        current = ACTIVE_PANEL_SESSIONS.get(self.message.id)
+        if current is not self:
+            return
+
+        clear_panel_session(self, cancel_task=False)
+        try:
+            await self.message.edit(
+                embed=main_panel_embed(
+                    notice="上一個操作畫面因 10 分鐘未操作而鎖定。"
+                ),
+                view=MonkMainPanelView(),
+            )
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            logger.exception("修士面板逾時後無法恢復主畫面。")
+
+
+ACTIVE_PANEL_SESSIONS: dict[int, PanelSession] = {}
+ACTIVE_OWNER_SESSIONS: dict[int, PanelSession] = {}
+
+
+def clear_panel_session(
+    session: PanelSession,
+    *,
+    cancel_task: bool = True,
+) -> None:
+    if ACTIVE_PANEL_SESSIONS.get(session.message.id) is session:
+        ACTIVE_PANEL_SESSIONS.pop(session.message.id, None)
+    if ACTIVE_OWNER_SESSIONS.get(session.owner_id) is session:
+        ACTIVE_OWNER_SESSIONS.pop(session.owner_id, None)
+
+    task = session.timeout_task
+    if (
+        cancel_task
+        and task is not None
+        and not task.done()
+        and task is not asyncio.current_task()
+    ):
+        task.cancel()
+
+
+def active_session_for_owner(owner_id: int) -> PanelSession | None:
+    return ACTIVE_OWNER_SESSIONS.get(int(owner_id))
+
+
+async def claim_panel_session(
+    interaction: discord.Interaction,
+) -> PanelSession | None:
+    message = interaction.message
+    if message is None:
+        await interaction.response.send_message(
+            "找不到修士面板訊息，請重新建立面板。",
+            ephemeral=True,
+        )
+        return None
+
+    existing = ACTIVE_PANEL_SESSIONS.get(message.id)
+    if existing is not None and existing.owner_id != interaction.user.id:
+        await interaction.response.send_message(
+            f"目前是 **{existing.owner_name}** 的操作畫面。"
+            "請等對方返回主面板，或等待 10 分鐘未操作後自動解鎖。",
+            ephemeral=True,
+        )
+        return None
+
+    if existing is None:
+        previous = ACTIVE_OWNER_SESSIONS.get(interaction.user.id)
+        if previous is not None:
+            clear_panel_session(previous)
+
+        existing = PanelSession(
+            owner_id=interaction.user.id,
+            owner_name=interaction.user.display_name,
+            message=message,
+        )
+        ACTIVE_PANEL_SESSIONS[message.id] = existing
+        ACTIVE_OWNER_SESSIONS[interaction.user.id] = existing
+
+    existing.touch()
+    return existing
+
+
+async def edit_active_panel_from_modal(
+    interaction: discord.Interaction,
+    *,
+    owner_id: int,
+    embed: discord.Embed,
+    view: discord.ui.View,
+) -> bool:
+    session = active_session_for_owner(owner_id)
+    if session is None:
+        await interaction.response.send_message(
+            "這個操作畫面已鎖定。請從修士主面板重新開始。",
+            ephemeral=True,
+        )
+        return False
+
+    session.touch()
+    await interaction.response.defer()
+    await session.message.edit(embed=embed, view=view)
+    return True
 
 
 def knowledge_source_label(match: KnowledgeMatch) -> str:
@@ -313,18 +471,75 @@ def student_profile_embed(profile: dict[str, Any]) -> discord.Embed:
     return embed
 
 
-class UserOwnedView(discord.ui.View):
-    def __init__(self, owner_id: int, *, timeout: float | None = 900) -> None:
-        super().__init__(timeout=timeout)
-        self.owner_id = int(owner_id)
+class ReturnToMainPanelButton(discord.ui.Button):
+    def __init__(self) -> None:
+        super().__init__(
+            label="返回修士面板",
+            style=discord.ButtonStyle.secondary,
+            emoji="↩️",
+            row=4,
+        )
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.owner_id:
+    async def callback(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        view = self.view
+        owner_id = getattr(view, "owner_id", interaction.user.id)
+        session = active_session_for_owner(owner_id)
+        if session is not None:
+            clear_panel_session(session)
+
+        await interaction.response.edit_message(
+            embed=main_panel_embed(),
+            view=MonkMainPanelView(),
+        )
+
+
+class UserOwnedView(discord.ui.View):
+    def __init__(
+        self,
+        owner_id: int,
+        *,
+        timeout: float | None = None,
+    ) -> None:
+        super().__init__(timeout=None)
+        self.owner_id = int(owner_id)
+        self.add_item(ReturnToMainPanelButton())
+
+    async def interaction_check(
+        self,
+        interaction: discord.Interaction,
+    ) -> bool:
+        if not _component_channel_allowed(interaction):
+            await _reject_wrong_component_channel(interaction)
+            return False
+
+        session = active_session_for_owner(self.owner_id)
+        message = interaction.message
+        valid_session = (
+            session is not None
+            and message is not None
+            and session.message.id == message.id
+            and ACTIVE_PANEL_SESSIONS.get(message.id) is session
+        )
+        if not valid_session:
             await interaction.response.send_message(
-                "這份資料屬於其他學生，不能代替操作。",
+                "這個操作畫面已鎖定。請從修士主面板重新開始。",
                 ephemeral=True,
             )
             return False
+
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                f"這是 **{session.owner_name}** 的操作畫面，"
+                "不能代替操作。請等對方返回主面板，"
+                "或等待 10 分鐘未操作後自動解鎖。",
+                ephemeral=True,
+            )
+            return False
+
+        session.touch()
         return True
 
 
@@ -382,9 +597,11 @@ class OraclePreferencesModal(discord.ui.Modal, title="神諭偏好設定"):
             preferred_scenes=str(self.preferred_scenes.value),
             allow_place_context=True,
         )
-        await interaction.response.send_message(
-            "神諭偏好已保存。姓名只會用於稱呼，不會被拿來推測神諭主題。",
-            ephemeral=True,
+        await edit_active_panel_from_modal(
+            interaction,
+            owner_id=self.user_id,
+            embed=student_dashboard_embed(self.user_id),
+            view=StudentHubView(self.user_id),
         )
 
 
@@ -466,15 +683,11 @@ class EnrollmentModal(discord.ui.Modal, title="禊月堂魔法大學｜入學登
             companion_name=str(self.companion_name.value),
         )
 
-        await interaction.response.send_message(
-            embed=monk_embed(
-                "✅ 入學資料已保存",
-                f"{self.preferred_name.value}，學籍已登記至 **{self.house}**。\n\n"
-                "接著可以補充神諭偏好，也可以登記商店、住處或工作室。",
-                color=0x3BA55D,
-            ),
-            view=ProfileNextStepView(self.user_id),
-            ephemeral=True,
+        await edit_active_panel_from_modal(
+            interaction,
+            owner_id=self.user_id,
+            embed=student_dashboard_embed(self.user_id),
+            view=StudentHubView(self.user_id),
         )
 
 
@@ -490,15 +703,20 @@ class DeleteProfileView(UserOwnedView):
         button: discord.ui.Button,
     ) -> None:
         deleted = ACADEMY_DB.delete_profile(self.owner_id)
-        self.stop()
+        session = active_session_for_owner(self.owner_id)
+        if session is not None:
+            clear_panel_session(session)
+
         await interaction.response.edit_message(
-            content=(
-                "學籍、個人地點與神諭冊已刪除。"
-                if deleted
-                else "目前沒有可刪除的學籍。"
+            content=None,
+            embed=main_panel_embed(
+                notice=(
+                    "學籍、個人地點與神諭冊已刪除。"
+                    if deleted
+                    else "目前沒有可刪除的學籍。"
+                )
             ),
-            embed=None,
-            view=None,
+            view=MonkMainPanelView(),
         )
 
     @discord.ui.button(
@@ -510,11 +728,10 @@ class DeleteProfileView(UserOwnedView):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        self.stop()
         await interaction.response.edit_message(
-            content="已取消刪除。",
-            embed=None,
-            view=None,
+            content=None,
+            embed=student_dashboard_embed(self.owner_id),
+            view=StudentHubView(self.owner_id),
         )
 
 
@@ -609,19 +826,14 @@ class PlaceModal(discord.ui.Modal, title="學院街區｜地點登記"):
             is_public=self.is_public,
         )
 
-        await interaction.response.send_message(
-            embed=monk_embed(
-                "🏘️ 地點登記完成",
-                f"**{self.place_name.value}** 已加入學院街區資料。\n\n"
-                f"類型：{self.place_type}\n"
-                f"店主／居住者：{self.operator_name.value}\n"
-                f"來源：{self.source_kind}\n"
-                f"公開：{'是' if self.is_public else '否'}\n"
-                f"可作神諭素材：是\n"
-                f"地點編號：{place_id}",
-                color=0x8B6F47,
+        await edit_active_panel_from_modal(
+            interaction,
+            owner_id=self.user_id,
+            embed=public_my_places_embed(self.user_id),
+            view=MyPlacesHubView(
+                self.user_id,
+                return_target="student",
             ),
-            ephemeral=True,
         )
 
 
@@ -646,9 +858,13 @@ def place_embed(
     return embed
 
 
-class PlacesView(discord.ui.View):
-    def __init__(self, places: list[dict[str, Any]]) -> None:
-        super().__init__(timeout=900)
+class PlacesView(UserOwnedView):
+    def __init__(
+        self,
+        owner_id: int,
+        places: list[dict[str, Any]],
+    ) -> None:
+        super().__init__(owner_id)
         self.places = places
         self.index = 0
         self._refresh_buttons()
@@ -1200,22 +1416,25 @@ class StudentPrivateMenuView(UserOwnedView):
     ) -> None:
         pages = ACADEMY_DB.list_oracles(self.owner_id)
         if not pages:
-            await interaction.response.send_message(
-                "神諭冊目前是空的。請從主面板的「神諭冊」領取本週神諭。",
-                ephemeral=True,
+            await interaction.response.edit_message(
+                embed=monk_embed(
+                    "📖 神諭冊目前是空的",
+                    "請從主面板的「神諭冊」領取本週神諭。",
+                    color=0x7A5AC8,
+                ),
+                view=self,
             )
             return
 
         oracle_view = OracleBookView(self.owner_id, pages)
-        await interaction.response.send_message(
+        await interaction.response.edit_message(
             embed=oracle_view.current_embed(),
             view=oracle_view,
-            ephemeral=True,
         )
 
 
 class StudentDataPanelView(discord.ui.View):
-    """公開固定面板；每次互動都依按鈕操作者查詢私密資料。"""
+    """相容舊面板；按下後同樣進入單一訊息工作階段。"""
 
     def __init__(self) -> None:
         super().__init__(timeout=None)
@@ -1241,60 +1460,27 @@ class StudentDataPanelView(discord.ui.View):
             )
             return
 
+        session = await claim_panel_session(interaction)
+        if session is None:
+            return
+
         profile = ACADEMY_DB.get_profile_bundle(interaction.user.id)
         if profile is None:
-            await interaction.response.send_message(
-                embed=student_dashboard_embed(interaction.user.id),
-                ephemeral=True,
+            await interaction.response.edit_message(
+                embed=monk_embed(
+                    "🎓 入學登記",
+                    "尚未建立學籍。先選擇學院與入學年份，"
+                    "再填寫學生資料。",
+                    color=0x5865F2,
+                ),
+                view=EnrollmentSetupView(interaction.user.id),
             )
             return
 
-        await interaction.response.send_message(
+        await interaction.response.edit_message(
             embed=student_dashboard_embed(interaction.user.id),
             view=StudentHubView(interaction.user.id),
         )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-TEACHING_CHOICES = [
-    app_commands.Choice(name=item["title"], value=item["id"])
-    for item in KNOWLEDGE.tutorials
-]
-
-
-
-
-
-
-
-
 
 
 
@@ -1444,25 +1630,23 @@ class StudentHubView(UserOwnedView):
     ) -> None:
         existing = ACADEMY_DB.get_profile(self.owner_id)
         if existing is None:
-            await interaction.response.send_message(
+            await interaction.response.edit_message(
                 embed=monk_embed(
                     "🎓 入學登記",
                     "請先選擇學院與入學年份，再繼續填寫資料。",
                     color=0x5865F2,
                 ),
                 view=EnrollmentSetupView(self.owner_id),
-                ephemeral=True,
             )
             return
 
-        await interaction.response.send_message(
+        await interaction.response.edit_message(
             embed=monk_embed(
                 "✏️ 修改學籍",
                 "先確認學院與入學年份，再開啟資料表單。",
                 color=0x5865F2,
             ),
             view=EnrollmentSetupView(self.owner_id, existing),
-            ephemeral=True,
         )
 
     @discord.ui.button(
@@ -1529,13 +1713,13 @@ class StudentHubView(UserOwnedView):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        await interaction.response.send_message(
+        await interaction.response.edit_message(
             content=(
                 "這會刪除你的學籍、神諭偏好、個人地點與神諭冊。"
                 "確定要繼續嗎？"
             ),
+            embed=None,
             view=DeleteProfileView(self.owner_id),
-            ephemeral=True,
         )
 
 
@@ -1878,9 +2062,13 @@ class MyPlacesHubView(UserOwnedView):
     ) -> None:
         places = ACADEMY_DB.list_user_places(self.owner_id)
         if not places:
-            await interaction.response.send_message(
-                "目前沒有可調整的地點，先按「新增地點」。",
-                ephemeral=True,
+            await interaction.response.edit_message(
+                embed=monk_embed(
+                    "👁️ 地點公開設定",
+                    "目前沒有可調整的地點，先按「新增地點」。",
+                    color=0x8B6F47,
+                ),
+                view=self,
             )
             return
 
@@ -1971,13 +2159,17 @@ class TownHubView(UserOwnedView):
         empty_message: str,
     ) -> None:
         if not places:
-            await interaction.response.send_message(
-                empty_message,
-                ephemeral=True,
+            await interaction.response.edit_message(
+                embed=monk_embed(
+                    "🏘️ 城下町",
+                    empty_message,
+                    color=0x8B6F47,
+                ),
+                view=TownHubView(self.owner_id),
             )
             return
 
-        view = PlacesView(places)
+        view = PlacesView(self.owner_id, places)
         await interaction.response.edit_message(
             embed=view.current_embed(),
             view=view,
@@ -2076,9 +2268,13 @@ class TownHubView(UserOwnedView):
     ) -> None:
         places = ACADEMY_DB.list_user_places(self.owner_id)
         if not places:
-            await interaction.response.send_message(
-                "目前沒有可調整公開狀態的地點。請先登記一個地點。",
-                ephemeral=True,
+            await interaction.response.edit_message(
+                embed=monk_embed(
+                    "👁️ 地點公開設定",
+                    "目前沒有可調整公開狀態的地點。請先登記一個地點。",
+                    color=0x8B6F47,
+                ),
+                view=self,
             )
             return
 
@@ -2101,75 +2297,81 @@ class TownHubView(UserOwnedView):
 async def _send_tutorial(
     interaction: discord.Interaction,
     tutorial_id: str,
+    owner_id: int,
 ) -> None:
     item = KNOWLEDGE.tutorial_by_id.get(tutorial_id)
     if not isinstance(item, dict):
-        await interaction.response.send_message(
-            "這份教學目前無法載入。請通知管理員檢查資料檔案。",
-            ephemeral=True,
+        await interaction.response.edit_message(
+            embed=monk_embed(
+                "📕 教學無法載入",
+                "這份教學目前無法載入。請通知管理員檢查資料檔案。",
+                color=0x992D22,
+            ),
+            view=TeachingHubView(owner_id),
         )
         return
 
     match = KnowledgeMatch("tutorial", item, item, 100_000)
-    await interaction.response.send_message(
+    await interaction.response.edit_message(
         embed=monk_embed(
             f"📖 修士教學｜{item.get('title', '教學')}",
             render_local_reply(match),
         ),
-        ephemeral=True,
+        view=TeachingHubView(owner_id),
     )
 
 
 async def _handle_teaching_question(
     interaction: discord.Interaction,
     question: str,
+    owner_id: int,
 ) -> None:
     nickname_reply = gorilla_nickname_reply(question)
     if nickname_reply is not None:
-        await interaction.response.send_message(
+        embed = monk_embed(
+            "📚 修士回覆",
             nickname_reply,
-            ephemeral=True,
-        )
-        return
-
-    refused = boundary_reply(question)
-    if refused is not None:
-        await interaction.response.send_message(
-            refused,
-            ephemeral=True,
-        )
-        return
-
-    local_result = await answer_question(KNOWLEDGE, question)
-    if local_result.match is not None:
-        match = local_result.match
-        await interaction.response.send_message(
-            embed=monk_embed(
-                f"📚 {match.tutorial['title']}",
-                render_local_reply(
-                    match,
-                    concise=True,
-                    gentle=is_emotional_distress(question),
-                ),
-                color=0x3BA55D,
-            ),
-            ephemeral=True,
-        )
-        return
-
-    description = (
-        f"{random_line('unknown_question', '「紀錄本裡沒有這題。」')}\n\n"
-        f"{NO_OFFICIAL_DATA}\n\n"
-        "教學查詢只使用本地正式知識庫，不會呼叫 AI。"
-        "請查看最新公告或詢問管理員。"
-    )
-    await interaction.response.send_message(
-        embed=monk_embed(
-            "📕 修士查不到答案",
-            description,
             color=0x992D22,
-        ),
-        ephemeral=True,
+        )
+    else:
+        refused = boundary_reply(question)
+        if refused is not None:
+            embed = monk_embed(
+                "📚 修士回覆",
+                refused,
+                color=0x992D22,
+            )
+        else:
+            local_result = await answer_question(KNOWLEDGE, question)
+            if local_result.match is not None:
+                match = local_result.match
+                embed = monk_embed(
+                    f"📚 {match.tutorial['title']}",
+                    render_local_reply(
+                        match,
+                        concise=True,
+                        gentle=is_emotional_distress(question),
+                    ),
+                    color=0x3BA55D,
+                )
+            else:
+                description = (
+                    f"{random_line('unknown_question', '「紀錄本裡沒有這題。」')}\n\n"
+                    f"{NO_OFFICIAL_DATA}\n\n"
+                    "教學查詢只使用本地正式知識庫，不會呼叫 AI。"
+                    "請查看最新公告或詢問管理員。"
+                )
+                embed = monk_embed(
+                    "📕 修士查不到答案",
+                    description,
+                    color=0x992D22,
+                )
+
+    await edit_active_panel_from_modal(
+        interaction,
+        owner_id=owner_id,
+        embed=embed,
+        view=TeachingHubView(owner_id),
     )
 
 
@@ -2183,6 +2385,10 @@ class TeachingQuestionModal(discord.ui.Modal, title="向赤木學長詢問教學
         max_length=300,
     )
 
+    def __init__(self, owner_id: int) -> None:
+        super().__init__()
+        self.owner_id = int(owner_id)
+
     async def on_submit(
         self,
         interaction: discord.Interaction,
@@ -2190,6 +2396,7 @@ class TeachingQuestionModal(discord.ui.Modal, title="向赤木學長詢問教學
         await _handle_teaching_question(
             interaction,
             str(self.question.value),
+            self.owner_id,
         )
 
 
@@ -2215,7 +2422,12 @@ class TutorialSelect(discord.ui.Select):
         self,
         interaction: discord.Interaction,
     ) -> None:
-        await _send_tutorial(interaction, self.values[0])
+        owner_id = getattr(self.view, "owner_id", interaction.user.id)
+        await _send_tutorial(
+            interaction,
+            self.values[0],
+            owner_id,
+        )
 
 
 class TeachingHubView(UserOwnedView):
@@ -2235,7 +2447,7 @@ class TeachingHubView(UserOwnedView):
         button: discord.ui.Button,
     ) -> None:
         await interaction.response.send_modal(
-            TeachingQuestionModal()
+            TeachingQuestionModal(self.owner_id)
         )
 
 
@@ -2243,12 +2455,16 @@ async def _handle_confession(
     interaction: discord.Interaction,
     content: str,
 ) -> None:
+    session = active_session_for_owner(interaction.user.id)
+
     nickname_reply = gorilla_nickname_reply(content)
     if nickname_reply is not None:
         await interaction.response.send_message(
             nickname_reply,
             ephemeral=True,
         )
+        if session is not None:
+            clear_panel_session(session)
         return
 
     refused = confession_boundary_reply(content)
@@ -2257,6 +2473,8 @@ async def _handle_confession(
             refused,
             ephemeral=True,
         )
+        if session is not None:
+            clear_panel_session(session)
         return
 
     if is_emotional_distress(content):
@@ -2290,6 +2508,8 @@ async def _handle_confession(
             ),
             ephemeral=True,
         )
+        if session is not None:
+            clear_panel_session(session)
         return
 
     usage_date = taipei_today().isoformat()
@@ -2310,15 +2530,13 @@ async def _handle_confession(
             ),
             ephemeral=True,
         )
+        if session is not None:
+            clear_panel_session(session)
         return
 
-    await interaction.response.edit_message(
-        embed=monk_embed(
-            "📖 神諭生成中",
-            "赤木修士正在整理本週素材。請稍候。",
-            color=0x7A5AC8,
-        ),
-        view=None,
+    await interaction.response.defer(
+        thinking=True,
+        ephemeral=True,
     )
 
     try:
@@ -2343,6 +2561,8 @@ async def _handle_confession(
             ),
             ephemeral=True,
         )
+        if session is not None:
+            clear_panel_session(session)
         return
 
     remaining = max(
@@ -2364,6 +2584,8 @@ async def _handle_confession(
         ),
         ephemeral=True,
     )
+    if session is not None:
+        clear_panel_session(session)
 
 
 class ConfessionModal(discord.ui.Modal, title="禊月堂修士告解室"):
@@ -2391,17 +2613,24 @@ async def _handle_current_week_oracle(
 ) -> None:
     profile = ACADEMY_DB.get_profile_bundle(interaction.user.id)
     if profile is None:
-        await interaction.response.send_message(
-            "請先從主面板的「學生資料」完成入學登記。",
-            ephemeral=True,
+        await interaction.response.edit_message(
+            embed=monk_embed(
+                "📖 尚未建立學籍",
+                "請先返回修士面板，從「學生資料」完成入學登記。",
+                color=0x7A5AC8,
+            ),
+            view=OracleHubView(interaction.user.id),
         )
         return
 
     if openai_client is None or not SETTINGS.oracle_ai_available:
-        await interaction.response.send_message(
-            "AI 神諭目前未啟用。"
-            "請管理員確認 `AI_ORACLE_ENABLED=true` 與 API Key。",
-            ephemeral=True,
+        await interaction.response.edit_message(
+            embed=monk_embed(
+                "📖 AI 神諭尚未啟用",
+                "請管理員確認 `AI_ORACLE_ENABLED=true` 與 API Key。",
+                color=0x7A5AC8,
+            ),
+            view=OracleHubView(interaction.user.id),
         )
         return
 
@@ -2413,7 +2642,7 @@ async def _handle_current_week_oracle(
         limit=SETTINGS.oracle_weekly_limit,
     )
     if reserved_draw is None:
-        await interaction.response.send_message(
+        await interaction.response.edit_message(
             embed=monk_embed(
                 "📖 本週神諭已抽完",
                 f"`{week.label}` 每位學生最多抽取 "
@@ -2421,7 +2650,7 @@ async def _handle_current_week_oracle(
                 "刪除神諭只會整理神諭冊，不會退還抽取次數。",
                 color=0x7A5AC8,
             ),
-            ephemeral=True,
+            view=OracleHubView(interaction.user.id),
         )
         return
 
@@ -2588,11 +2817,15 @@ class MonkMainPanelView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
+        session = await claim_panel_session(interaction)
+        if session is None:
+            return
+
         profile = ACADEMY_DB.get_profile_bundle(
             interaction.user.id
         )
         if profile is None:
-            await interaction.response.send_message(
+            await interaction.response.edit_message(
                 embed=monk_embed(
                     "🎓 入學登記",
                     "尚未建立學籍。先選擇學院與入學年份，"
@@ -2600,11 +2833,10 @@ class MonkMainPanelView(discord.ui.View):
                     color=0x5865F2,
                 ),
                 view=EnrollmentSetupView(interaction.user.id),
-                ephemeral=True,
             )
             return
 
-        await interaction.response.send_message(
+        await interaction.response.edit_message(
             embed=student_dashboard_embed(interaction.user.id),
             view=StudentHubView(interaction.user.id),
         )
@@ -2621,7 +2853,11 @@ class MonkMainPanelView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        await interaction.response.send_message(
+        session = await claim_panel_session(interaction)
+        if session is None:
+            return
+
+        await interaction.response.edit_message(
             embed=monk_embed(
                 "🏘️ 禊月堂魔法學院城下町",
                 "查看公開商店街與校外居住地，"
@@ -2643,7 +2879,11 @@ class MonkMainPanelView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        await interaction.response.send_message(
+        session = await claim_panel_session(interaction)
+        if session is None:
+            return
+
+        await interaction.response.edit_message(
             embed=monk_embed(
                 "📖 禊月堂個人神諭冊",
                 "每位學生每週可抽 3 次神諭，並翻閱、標記或刪除頁面。",
@@ -2664,7 +2904,11 @@ class MonkMainPanelView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        await interaction.response.send_message(
+        session = await claim_panel_session(interaction)
+        if session is None:
+            return
+
+        await interaction.response.edit_message(
             embed=monk_embed(
                 "📚 赤木學長教學櫃臺",
                 "從選單挑選正式教學，"
@@ -2686,6 +2930,10 @@ class MonkMainPanelView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
+        session = await claim_panel_session(interaction)
+        if session is None:
+            return
+
         await interaction.response.send_modal(
             ConfessionModal()
         )
@@ -2711,23 +2959,8 @@ async def create_monk_panel(
         )
         return
 
-    embed = monk_embed(
-        "◆ 禊月堂修士教室",
-        "赤木修士正在整理學生資料與本週紀錄。\n\n"
-        "請使用下方按鈕進入對應功能：\n"
-        "・學生資料：入學登記、學籍、神諭偏好\n"
-        "・城下町：商店街、校外住處、地點登記\n"
-        "・神諭冊：本週神諭與完成紀錄\n"
-        "・教學：正式遊戲教學與 FAQ\n"
-        "・告解：一次性陪伴，不修改正式罪惡值",
-        color=0x8B6F47,
-    )
-    embed.set_footer(
-        text="個人資料與告解內容只會私密顯示給操作者本人。"
-    )
-
     await interaction.response.send_message(
-        embed=embed,
+        embed=main_panel_embed(),
         view=MonkMainPanelView(),
     )
 
