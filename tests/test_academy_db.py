@@ -112,6 +112,40 @@ class AcademyDatabaseTests(unittest.TestCase):
         self.assertEqual(page["week_label"], "7-4")
         self.assertEqual(page["status"], "未完成")
 
+        second_page = self.db.create_oracle(
+            user_id=123,
+            week=week,
+            oracle_text="同週第二頁神諭。",
+            used_keywords="熱可可",
+            used_place_names="",
+        )
+        self.assertNotEqual(page["id"], second_page["id"])
+        self.assertEqual(
+            self.db.count_oracles_by_week(123, week.key),
+            2,
+        )
+        self.assertEqual(
+            self.db.get_oracle_by_week(123, week.key)["id"],
+            second_page["id"],
+        )
+
+        self.assertTrue(
+            self.db.delete_oracle(
+                page_id=second_page["id"],
+                user_id=123,
+            )
+        )
+        self.assertEqual(
+            self.db.count_oracles_by_week(123, week.key),
+            1,
+        )
+        self.assertFalse(
+            self.db.delete_oracle(
+                page_id=second_page["id"],
+                user_id=999,
+            )
+        )
+
         updated = self.db.set_oracle_status(
             page_id=page["id"],
             user_id=123,
@@ -132,6 +166,84 @@ class AcademyDatabaseTests(unittest.TestCase):
 
         self.assertTrue(self.db.delete_profile(123))
         self.assertEqual(self.db.list_oracles(123), [])
+
+
+class OracleUnlimitedMigrationTests(unittest.TestCase):
+    def test_legacy_weekly_unique_constraint_is_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "legacy.db"
+            connection = __import__("sqlite3").connect(path)
+            connection.executescript(
+                """
+                CREATE TABLE student_profiles (
+                    user_id TEXT PRIMARY KEY,
+                    student_name TEXT NOT NULL,
+                    preferred_name TEXT NOT NULL,
+                    house TEXT NOT NULL,
+                    major TEXT NOT NULL DEFAULT '',
+                    enrollment_year TEXT NOT NULL DEFAULT '',
+                    introduction TEXT NOT NULL DEFAULT '',
+                    companion_name TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                INSERT INTO student_profiles (
+                    user_id, student_name, preferred_name, house,
+                    created_at, updated_at
+                )
+                VALUES ('123', '學生', '學生', '星泉院', 'now', 'now');
+
+                CREATE TABLE oracle_pages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    week_key TEXT NOT NULL,
+                    week_label TEXT NOT NULL,
+                    year INTEGER NOT NULL,
+                    month INTEGER NOT NULL,
+                    week_index INTEGER NOT NULL,
+                    period_start TEXT NOT NULL,
+                    period_end TEXT NOT NULL,
+                    oracle_text TEXT NOT NULL,
+                    used_keywords TEXT NOT NULL DEFAULT '',
+                    used_place_names TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT '未完成',
+                    completed_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(user_id, week_key)
+                );
+
+                INSERT INTO oracle_pages (
+                    user_id, week_key, week_label, year, month,
+                    week_index, period_start, period_end, oracle_text,
+                    created_at, updated_at
+                )
+                VALUES (
+                    '123', '2026-07-4', '7-4', 2026, 7, 4,
+                    '2026-07-22', '2026-07-28', '舊神諭', 'now', 'now'
+                );
+                """
+            )
+            connection.commit()
+            connection.close()
+
+            db = AcademyDatabase(path)
+            db.initialize()
+            week = month_week_info(date(2026, 7, 22))
+            new_page = db.create_oracle(
+                user_id=123,
+                week=week,
+                oracle_text="遷移後的新神諭",
+                used_keywords="",
+                used_place_names="",
+            )
+
+            self.assertIsNotNone(new_page)
+            self.assertEqual(
+                db.count_oracles_by_week(123, week.key),
+                2,
+            )
 
 
 if __name__ == "__main__":

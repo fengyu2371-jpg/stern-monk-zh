@@ -832,7 +832,107 @@ class OracleBookView(UserOwnedView):
             view=self,
         )
 
+    @discord.ui.button(
+        label="刪除此頁",
+        style=discord.ButtonStyle.danger,
+        emoji="🗑️",
+        row=1,
+    )
+    async def delete_page(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        page = self.pages[self.index]
+        await interaction.response.edit_message(
+            embed=monk_embed(
+                "⚠️ 確認刪除神諭",
+                f"即將刪除 **{page['week_label']}** 的這一頁神諭。\\n\\n"
+                "刪除後無法復原，但可以再抽一頁新的測試神諭。",
+                color=0xED4245,
+            ),
+            view=OracleDeleteConfirmView(
+                self.owner_id,
+                self.pages,
+                self.index,
+            ),
+        )
 
+
+class OracleDeleteConfirmView(UserOwnedView):
+    def __init__(
+        self,
+        owner_id: int,
+        pages: list[dict[str, Any]],
+        index: int,
+    ) -> None:
+        super().__init__(owner_id, timeout=300)
+        self.pages = list(pages)
+        self.index = index
+
+    @discord.ui.button(
+        label="確認刪除",
+        style=discord.ButtonStyle.danger,
+        emoji="🗑️",
+    )
+    async def confirm_delete(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        page = self.pages[self.index]
+        deleted = ACADEMY_DB.delete_oracle(
+            page_id=int(page["id"]),
+            user_id=self.owner_id,
+        )
+        if not deleted:
+            await interaction.response.send_message(
+                "找不到這一頁神諭，可能已經被刪除。",
+                ephemeral=True,
+            )
+            return
+
+        self.pages.pop(self.index)
+        if not self.pages:
+            await interaction.response.edit_message(
+                embed=monk_embed(
+                    "📖 神諭冊目前是空的",
+                    "這一頁已刪除。測試期間可以按「抽取新神諭」重新建立。",
+                    color=0x7A5AC8,
+                ),
+                view=OracleHubView(self.owner_id),
+            )
+            return
+
+        next_index = min(self.index, len(self.pages) - 1)
+        book_view = OracleBookView(
+            self.owner_id,
+            self.pages,
+            index=next_index,
+        )
+        await interaction.response.edit_message(
+            embed=book_view.current_embed(),
+            view=book_view,
+        )
+
+    @discord.ui.button(
+        label="取消",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def cancel_delete(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        book_view = OracleBookView(
+            self.owner_id,
+            self.pages,
+            index=self.index,
+        )
+        await interaction.response.edit_message(
+            embed=book_view.current_embed(),
+            view=book_view,
+        )
 
 
 def _truncate_text(text: str, limit: int) -> str:
@@ -856,12 +956,9 @@ def student_dashboard_embed(user_id: int) -> discord.Embed:
     places = ACADEMY_DB.list_user_places(user_id)
     pages = ACADEMY_DB.list_oracles(user_id)
     current_week = month_week_info()
-    current_page = ACADEMY_DB.get_oracle_by_week(user_id, current_week.key)
-
-    current_status = (
-        current_page["status"]
-        if current_page is not None
-        else "本週尚未建立"
+    current_count = ACADEMY_DB.count_oracles_by_week(
+        user_id,
+        current_week.key,
     )
 
     embed = monk_embed(
@@ -895,7 +992,7 @@ def student_dashboard_embed(user_id: int) -> discord.Embed:
         name="📖 神諭冊",
         value=(
             f"目前共有 **{len(pages)}** 頁。\n"
-            f"本週 `{current_week.label}`：**{current_status}**"
+            f"本週 `{current_week.label}`：已建立 **{current_count}** 頁"
         ),
         inline=True,
     )
@@ -2043,110 +2140,95 @@ async def _handle_current_week_oracle(
         )
         return
 
-    week = month_week_info()
-    existing_page = ACADEMY_DB.get_oracle_by_week(
-        interaction.user.id,
-        week.key,
-    )
-
-    if existing_page is None:
-        if openai_client is None or not SETTINGS.oracle_ai_available:
-            await interaction.response.send_message(
-                "本週尚未建立神諭，而且 AI 神諭目前未啟用。"
-                "請管理員確認 `AI_ORACLE_ENABLED=true` 與 API Key。",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.defer(
-            thinking=True,
-            ephemeral=True,
-        )
-
-        preferences = profile.get("preferences", {})
-        all_places = ACADEMY_DB.list_oracle_places(
-            interaction.user.id
-        )
-        weekly_keywords = select_weekly_keywords(
-            user_id=interaction.user.id,
-            week_key=week.key,
-            creative_keywords=preferences.get(
-                "creative_keywords",
-                "",
-            ),
-            liked_themes=preferences.get("liked_themes", ""),
-            preferred_scenes=preferences.get(
-                "preferred_scenes",
-                "",
-            ),
-        )
-        weekly_places = select_weekly_places(
-            user_id=interaction.user.id,
-            week_key=week.key,
-            places=all_places,
-        )
-
-        try:
-            oracle_text = await generate_oracle(
-                client=openai_client,
-                model=SETTINGS.openai_model,
-                max_output_tokens=SETTINGS.oracle_max_output_tokens,
-                user_id=interaction.user.id,
-                profile=profile,
-                preferences=preferences,
-                places=weekly_places,
-                week=week,
-                weekly_keywords=weekly_keywords,
-            )
-        except Exception:
-            logger.exception("OpenAI API 神諭生成失敗")
-            await interaction.followup.send(
-                "本週神諭生成失敗。請稍後再試，"
-                "或請管理員查看 Railway 紀錄。",
-                ephemeral=True,
-            )
-            return
-
-        existing_page = ACADEMY_DB.create_oracle(
-            user_id=interaction.user.id,
-            week=week,
-            oracle_text=oracle_text,
-            used_keywords="、".join(weekly_keywords),
-            used_place_names="、".join(
-                place["name"] for place in weekly_places
-            ),
-        )
-
-        pages = ACADEMY_DB.list_oracles(interaction.user.id)
-        index = next(
-            i
-            for i, page in enumerate(pages)
-            if page["id"] == existing_page["id"]
-        )
-        view = OracleBookView(
-            interaction.user.id,
-            pages,
-            index=index,
-        )
-        await interaction.followup.send(
-            embed=view.current_embed(),
-            view=view,
+    if openai_client is None or not SETTINGS.oracle_ai_available:
+        await interaction.response.send_message(
+            "AI 神諭目前未啟用。"
+            "請管理員確認 `AI_ORACLE_ENABLED=true` 與 API Key。",
             ephemeral=True,
         )
         return
+
+    week = month_week_info()
+    draw_number = (
+        ACADEMY_DB.count_oracles_by_week(
+            interaction.user.id,
+            week.key,
+        )
+        + 1
+    )
+    selection_key = f"{week.key}:draw:{draw_number}"
+
+    await interaction.response.defer(
+        thinking=True,
+        ephemeral=True,
+    )
+
+    preferences = profile.get("preferences", {})
+    all_places = ACADEMY_DB.list_oracle_places(
+        interaction.user.id
+    )
+    weekly_keywords = select_weekly_keywords(
+        user_id=interaction.user.id,
+        week_key=selection_key,
+        creative_keywords=preferences.get(
+            "creative_keywords",
+            "",
+        ),
+        liked_themes=preferences.get("liked_themes", ""),
+        preferred_scenes=preferences.get(
+            "preferred_scenes",
+            "",
+        ),
+    )
+    weekly_places = select_weekly_places(
+        user_id=interaction.user.id,
+        week_key=selection_key,
+        places=all_places,
+    )
+
+    try:
+        oracle_text = await generate_oracle(
+            client=openai_client,
+            model=SETTINGS.openai_model,
+            max_output_tokens=SETTINGS.oracle_max_output_tokens,
+            user_id=interaction.user.id,
+            profile=profile,
+            preferences=preferences,
+            places=weekly_places,
+            week=week,
+            weekly_keywords=weekly_keywords,
+        )
+    except Exception:
+        logger.exception("OpenAI API 神諭生成失敗")
+        await interaction.followup.send(
+            "神諭生成失敗。請稍後再試，"
+            "或請管理員查看 Railway 紀錄。",
+            ephemeral=True,
+        )
+        return
+
+    new_page = ACADEMY_DB.create_oracle(
+        user_id=interaction.user.id,
+        week=week,
+        oracle_text=oracle_text,
+        used_keywords="、".join(weekly_keywords),
+        used_place_names="、".join(
+            place["name"] for place in weekly_places
+        ),
+    )
 
     pages = ACADEMY_DB.list_oracles(interaction.user.id)
     index = next(
         i
         for i, page in enumerate(pages)
-        if page["id"] == existing_page["id"]
+        if page["id"] == new_page["id"]
     )
     view = OracleBookView(
         interaction.user.id,
         pages,
         index=index,
     )
-    await interaction.response.send_message(
+    await interaction.followup.send(
         embed=view.current_embed(),
         view=view,
         ephemeral=True,
@@ -2158,7 +2240,7 @@ class OracleHubView(UserOwnedView):
         super().__init__(owner_id, timeout=900)
 
     @discord.ui.button(
-        label="本週神諭",
+        label="抽取新神諭",
         style=discord.ButtonStyle.primary,
         emoji="✨",
         row=0,
@@ -2184,7 +2266,7 @@ class OracleHubView(UserOwnedView):
         pages = ACADEMY_DB.list_oracles(self.owner_id)
         if not pages:
             await interaction.response.send_message(
-                "神諭冊目前是空的。請先按「本週神諭」建立第一頁。",
+                "神諭冊目前是空的。請先按「抽取新神諭」建立第一頁。",
                 ephemeral=True,
             )
             return
@@ -2281,7 +2363,7 @@ class MonkMainPanelView(discord.ui.View):
         await interaction.response.send_message(
             embed=monk_embed(
                 "📖 禊月堂個人神諭冊",
-                "領取本週神諭，或翻閱過去頁面並標記完成狀態。",
+                "測試期間可不限次數抽取神諭，並翻閱、標記或刪除頁面。",
                 color=0x7A5AC8,
             ),
             view=OracleHubView(interaction.user.id),

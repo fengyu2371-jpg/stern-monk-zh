@@ -54,6 +54,75 @@ class AcademyDatabase:
         conn.execute("PRAGMA busy_timeout = 15000;")
         return conn
 
+    def _migrate_oracle_pages_for_unlimited_draws(
+        self,
+        conn: sqlite3.Connection,
+    ) -> None:
+        row = conn.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'oracle_pages'
+            """
+        ).fetchone()
+        if row is None:
+            return
+
+        normalized_sql = "".join(str(row["sql"] or "").upper().split())
+        if "UNIQUE(USER_ID,WEEK_KEY)" not in normalized_sql:
+            return
+
+        # v12 以前每位玩家每週只能有一頁。
+        # 改建資料表並完整保留既有神諭。
+        conn.executescript(
+            """
+            ALTER TABLE oracle_pages
+            RENAME TO oracle_pages_limited_backup;
+
+            DROP INDEX IF EXISTS idx_oracle_pages_user_week;
+
+            CREATE TABLE oracle_pages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                week_key TEXT NOT NULL,
+                week_label TEXT NOT NULL,
+                year INTEGER NOT NULL,
+                month INTEGER NOT NULL,
+                week_index INTEGER NOT NULL,
+                period_start TEXT NOT NULL,
+                period_end TEXT NOT NULL,
+                oracle_text TEXT NOT NULL,
+                used_keywords TEXT NOT NULL DEFAULT '',
+                used_place_names TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT '未完成',
+                completed_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id)
+                    REFERENCES student_profiles(user_id)
+                    ON DELETE CASCADE
+            );
+
+            INSERT INTO oracle_pages (
+                id, user_id, week_key, week_label, year, month,
+                week_index, period_start, period_end, oracle_text,
+                used_keywords, used_place_names, status, completed_at,
+                created_at, updated_at
+            )
+            SELECT
+                id, user_id, week_key, week_label, year, month,
+                week_index, period_start, period_end, oracle_text,
+                used_keywords, used_place_names, status, completed_at,
+                created_at, updated_at
+            FROM oracle_pages_limited_backup;
+
+            DROP TABLE oracle_pages_limited_backup;
+
+            CREATE INDEX IF NOT EXISTS idx_oracle_pages_user_week
+            ON oracle_pages(user_id, year, month, week_index);
+            """
+        )
+
     def initialize(self) -> None:
         with closing(self.connect()) as conn:
             conn.execute("PRAGMA journal_mode = WAL;")
@@ -126,7 +195,6 @@ class AcademyDatabase:
                     completed_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    UNIQUE(user_id, week_key),
                     FOREIGN KEY (user_id)
                         REFERENCES student_profiles(user_id)
                         ON DELETE CASCADE
@@ -136,6 +204,8 @@ class AcademyDatabase:
                 ON oracle_pages(user_id, year, month, week_index);
                 """
             )
+            self._migrate_oracle_pages_for_unlimited_draws(conn)
+
             # v12：所有學生自建地點都能作為該玩家的神諭素材。
             # 保留 allow_oracle 欄位以相容舊資料，但值統一為 1。
             conn.execute(
@@ -422,10 +492,28 @@ class AcademyDatabase:
                 """
                 SELECT * FROM oracle_pages
                 WHERE user_id = ? AND week_key = ?
+                ORDER BY id DESC
+                LIMIT 1
                 """,
                 (str(user_id), week_key),
             ).fetchone()
         return self._row_dict(row)
+
+    def count_oracles_by_week(
+        self,
+        user_id: int,
+        week_key: str,
+    ) -> int:
+        with closing(self.connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM oracle_pages
+                WHERE user_id = ? AND week_key = ?
+                """,
+                (str(user_id), week_key),
+            ).fetchone()
+        return int(row["total"] if row is not None else 0)
 
     def create_oracle(
         self,
@@ -438,9 +526,9 @@ class AcademyDatabase:
     ) -> dict[str, Any]:
         now = utc_now_iso()
         with closing(self.connect()) as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
-                INSERT OR IGNORE INTO oracle_pages (
+                INSERT INTO oracle_pages (
                     user_id, week_key, week_label, year, month, week_index,
                     period_start, period_end, oracle_text, used_keywords,
                     used_place_names, status, completed_at, created_at, updated_at
@@ -463,12 +551,31 @@ class AcademyDatabase:
                     now,
                 ),
             )
+            page_id = int(cursor.lastrowid)
             conn.commit()
 
-        page = self.get_oracle_by_week(user_id, week.key)
+        page = self.get_oracle(page_id)
         if page is None:
             raise RuntimeError("神諭頁面建立失敗。")
         return page
+
+    def delete_oracle(
+        self,
+        *,
+        page_id: int,
+        user_id: int,
+    ) -> bool:
+        with closing(self.connect()) as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM oracle_pages
+                WHERE id = ? AND user_id = ?
+                """,
+                (int(page_id), str(user_id)),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
+
 
     def list_oracles(self, user_id: int) -> list[dict[str, Any]]:
         with closing(self.connect()) as conn:
