@@ -307,6 +307,53 @@ class AcademyDatabase:
             conn.commit()
             return int(cursor.lastrowid)
 
+    def get_user_place(
+        self,
+        *,
+        user_id: int,
+        place_id: int,
+    ) -> dict[str, Any] | None:
+        with closing(self.connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM student_places
+                WHERE id = ? AND user_id = ?
+                """,
+                (int(place_id), str(user_id)),
+            ).fetchone()
+        return self._row_dict(row)
+
+    def update_place_visibility(
+        self,
+        *,
+        user_id: int,
+        place_id: int,
+        is_public: bool,
+    ) -> dict[str, Any] | None:
+        now = utc_now_iso()
+        with closing(self.connect()) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE student_places
+                SET is_public = ?, updated_at = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                (
+                    int(bool(is_public)),
+                    now,
+                    int(place_id),
+                    str(user_id),
+                ),
+            )
+            conn.commit()
+
+        if cursor.rowcount <= 0:
+            return None
+        return self.get_user_place(
+            user_id=user_id,
+            place_id=place_id,
+        )
+
     def list_user_places(self, user_id: int) -> list[dict[str, Any]]:
         with closing(self.connect()) as conn:
             rows = conn.execute(

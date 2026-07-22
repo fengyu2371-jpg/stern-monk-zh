@@ -70,6 +70,31 @@ class AcademyDatabaseTests(unittest.TestCase):
         self.assertEqual(len(self.db.list_user_places(123)), 1)
         self.assertEqual(len(self.db.list_public_places("書店")), 1)
 
+        place = self.db.list_user_places(123)[0]
+        hidden = self.db.update_place_visibility(
+            user_id=123,
+            place_id=place["id"],
+            is_public=False,
+        )
+        self.assertEqual(hidden["is_public"], 0)
+        self.assertEqual(self.db.list_public_places("書店"), [])
+
+        shown = self.db.update_place_visibility(
+            user_id=123,
+            place_id=place["id"],
+            is_public=True,
+        )
+        self.assertEqual(shown["is_public"], 1)
+        self.assertEqual(len(self.db.list_public_places("書店")), 1)
+
+        self.assertIsNone(
+            self.db.update_place_visibility(
+                user_id=999,
+                place_id=place["id"],
+                is_public=False,
+            )
+        )
+
         week = month_week_info(date(2026, 7, 22))
         page = self.db.create_oracle(
             user_id=123,

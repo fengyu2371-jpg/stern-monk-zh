@@ -1480,6 +1480,189 @@ class PlaceRegistrationOptionsView(UserOwnedView):
         )
 
 
+
+
+def place_visibility_embed(place: dict[str, Any]) -> discord.Embed:
+    visibility = "公開" if place.get("is_public") else "不公開"
+    visibility_note = (
+        "此地點會出現在其他學生可查看的城下町名單中。"
+        if place.get("is_public")
+        else "此地點只會保存在你的個人資料中，不會出現在公開名單。"
+    )
+    return monk_embed(
+        f"👁️ 地點公開設定｜{place.get('name', '未命名地點')}",
+        f"**類型**：{place.get('place_type') or '未設定'}\n"
+        f"**區域**：{place.get('district') or '未設定'}\n"
+        f"**目前設定**：{visibility}\n"
+        f"**神諭可用**：{'是' if place.get('allow_oracle') else '否'}\n\n"
+        f"{visibility_note}",
+        color=0x8B6F47,
+    )
+
+
+class PlaceVisibilityEditorView(UserOwnedView):
+    def __init__(
+        self,
+        owner_id: int,
+        place: dict[str, Any],
+    ) -> None:
+        super().__init__(owner_id, timeout=900)
+        self.place = place
+        self._refresh_button()
+
+    def _refresh_button(self) -> None:
+        is_public = bool(self.place.get("is_public"))
+        self.toggle_visibility.label = (
+            f"公開顯示：{'是' if is_public else '否'}"
+        )
+        self.toggle_visibility.style = (
+            discord.ButtonStyle.success
+            if is_public
+            else discord.ButtonStyle.secondary
+        )
+
+    @discord.ui.button(
+        label="公開顯示：是",
+        style=discord.ButtonStyle.success,
+        emoji="👁️",
+    )
+    async def toggle_visibility(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        updated = ACADEMY_DB.update_place_visibility(
+            user_id=self.owner_id,
+            place_id=int(self.place["id"]),
+            is_public=not bool(self.place.get("is_public")),
+        )
+        if updated is None:
+            await interaction.response.send_message(
+                "找不到這個地點，可能已被刪除。",
+                ephemeral=True,
+            )
+            return
+
+        self.place = updated
+        self._refresh_button()
+        await interaction.response.edit_message(
+            embed=place_visibility_embed(self.place),
+            view=self,
+        )
+
+    @discord.ui.button(
+        label="選擇其他地點",
+        style=discord.ButtonStyle.primary,
+        emoji="📍",
+    )
+    async def choose_another(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        places = ACADEMY_DB.list_user_places(self.owner_id)
+        if not places:
+            await interaction.response.edit_message(
+                embed=monk_embed(
+                    "👁️ 地點公開設定",
+                    "目前沒有可管理的地點。",
+                    color=0x8B6F47,
+                ),
+                view=TownHubView(self.owner_id),
+            )
+            return
+
+        await interaction.response.edit_message(
+            embed=monk_embed(
+                "👁️ 地點公開設定",
+                "選擇要調整公開狀態的地點。",
+                color=0x8B6F47,
+            ),
+            view=PlaceVisibilityPickerView(self.owner_id, places),
+        )
+
+
+class PlaceVisibilitySelect(discord.ui.Select):
+    def __init__(
+        self,
+        owner_id: int,
+        places: list[dict[str, Any]],
+    ) -> None:
+        self.owner_id = int(owner_id)
+        self.places_by_id = {
+            str(place["id"]): place for place in places[:25]
+        }
+        options = [
+            discord.SelectOption(
+                label=_truncate_text(place["name"], 80),
+                value=str(place["id"]),
+                description=(
+                    f"{place['place_type']}｜"
+                    f"{'公開' if place['is_public'] else '不公開'}"
+                )[:100],
+                emoji="👁️" if place["is_public"] else "🔒",
+            )
+            for place in places[:25]
+        ]
+        super().__init__(
+            placeholder="選擇要編輯的地點",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        place_id = int(self.values[0])
+        place = ACADEMY_DB.get_user_place(
+            user_id=self.owner_id,
+            place_id=place_id,
+        )
+        if place is None:
+            await interaction.response.send_message(
+                "找不到這個地點，請重新開啟公開設定。",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.edit_message(
+            embed=place_visibility_embed(place),
+            view=PlaceVisibilityEditorView(self.owner_id, place),
+        )
+
+
+class PlaceVisibilityPickerView(UserOwnedView):
+    def __init__(
+        self,
+        owner_id: int,
+        places: list[dict[str, Any]],
+    ) -> None:
+        super().__init__(owner_id, timeout=900)
+        self.add_item(PlaceVisibilitySelect(owner_id, places))
+
+    @discord.ui.button(
+        label="返回城下町",
+        style=discord.ButtonStyle.secondary,
+        emoji="↩️",
+        row=1,
+    )
+    async def back_to_town(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=monk_embed(
+                "🏘️ 禊月堂城下町",
+                "查看公開店鋪與校外住處，或管理自己的地點。",
+                color=0x8B6F47,
+            ),
+            view=TownHubView(self.owner_id),
+        )
+
+
 class TownHubView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
         super().__init__(owner_id, timeout=900)
@@ -1578,6 +1761,40 @@ class TownHubView(UserOwnedView):
                 color=0x8B6F47,
             ),
             view=PlaceRegistrationOptionsView(self.owner_id),
+        )
+
+    @discord.ui.button(
+        label="公開設定",
+        style=discord.ButtonStyle.secondary,
+        emoji="👁️",
+        row=1,
+    )
+    async def visibility_settings(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        places = ACADEMY_DB.list_user_places(self.owner_id)
+        if not places:
+            await interaction.response.send_message(
+                "目前沒有可調整公開狀態的地點。請先登記一個地點。",
+                ephemeral=True,
+            )
+            return
+
+        note = ""
+        if len(places) > 25:
+            note = "\n\n目前先顯示前 25 個地點。"
+
+        await interaction.response.edit_message(
+            embed=monk_embed(
+                "👁️ 地點公開設定",
+                "選擇地點後，即可切換公開或不公開。"
+                "不公開的地點不會出現在商店街或校外居住地名單。"
+                + note,
+                color=0x8B6F47,
+            ),
+            view=PlaceVisibilityPickerView(self.owner_id, places),
         )
 
 
