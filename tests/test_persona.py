@@ -11,10 +11,10 @@ from persona import (
 
 class BoundaryTests(unittest.TestCase):
     def test_rejects_confession_to_monk(self) -> None:
-        self.assertEqual(boundary_reply("我想跟你告白"), "告解可以，告白不受理。請把真正想說的事講清楚。")
+        self.assertEqual(boundary_reply("我想跟你告白"), "告白不受理。若要告解，請直接說明真正需要整理的事情。")
 
     def test_rejects_dating_request(self) -> None:
-        self.assertEqual(boundary_reply("可以跟我交往嗎"), "修道院不處理交往申請。遊戲問題可以繼續問。")
+        self.assertEqual(boundary_reply("可以跟我交往嗎"), "交往、約會與結婚申請不受理。遊戲問題可以繼續問。")
 
     def test_rejects_intimate_address_request(self) -> None:
         reply = boundary_reply("以後叫我寶貝")
@@ -34,9 +34,23 @@ class BoundaryTests(unittest.TestCase):
 
         self.assertEqual(
             reply,
-            "「這不是告解內容，我不會接受這類邀請。」\n\n"
-            "「若你有真正想整理的事情，可以重新說。我會聽。」",
+            "「這不是告解內容。告白與親密邀請一律不受理。」",
         )
+
+    def test_rejects_plain_love_confession(self) -> None:
+        self.assertIsNotNone(boundary_reply("修士，我喜歡你"))
+
+    def test_rejects_spaced_love_confession(self) -> None:
+        self.assertIsNotNone(boundary_reply("修 士，我 最 喜 歡 你！"))
+
+    def test_rejects_romantic_confession_inside_confession_command(self) -> None:
+        self.assertEqual(
+            confession_boundary_reply("我的罪是喜歡赤木學長"),
+            "「這不是告解內容。告白與親密邀請一律不受理。」",
+        )
+
+    def test_allows_non_romantic_praise(self) -> None:
+        self.assertIsNone(boundary_reply("我很喜歡你的教學風格"))
 
 
 

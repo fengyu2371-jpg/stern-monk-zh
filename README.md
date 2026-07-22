@@ -1,4 +1,4 @@
-# stern-monk-zh-tw v5｜萬年學長版
+# stern-monk-zh-tw v8｜學院街區與神諭冊版
 
 禊月堂繁體中文「修士」Discord Bot。
 
@@ -18,6 +18,16 @@
 - `/問修士`
 - `/修士告解`（AI 一次性陪伴；失敗時回退本地回覆，不修改正式罪惡值）
 - `/修士狀態`
+- `/入學登記`
+- `/我的學籍`
+- `/修改學籍`
+- `/神諭偏好`
+- `/刪除學籍`
+- `/地點登記`
+- `/我的地點`
+- `/學院街區`
+- `/本週神諭`
+- `/神諭冊`
 
 這些都是修士自己的教學、規則查詢、角色演出與狀態指令；不包含或代理神父 Bot 的遊戲操作指令。
 
@@ -40,10 +50,13 @@ MONK_CHANNEL_ID=修士唯一允許回覆的 Discord 頻道 ID
 
 AI_ENABLED=true
 AI_CONFESSION_ENABLED=true
+AI_ORACLE_ENABLED=true
 OPENAI_API_KEY=你的 OpenAI API Key
 OPENAI_MODEL=gpt-5-nano
 AI_DAILY_LIMIT=5
 AI_MAX_OUTPUT_TOKENS=180
+ORACLE_MAX_OUTPUT_TOKENS=700
+MONK_DB_PATH=/app/storage/monk.db
 BOT_LANGUAGE=zh-TW
 ```
 
@@ -121,3 +134,48 @@ python -m unittest discover -s tests -v
 - 加入高校籃球隊長、魔法大學學分競賽、安西神父感召與「全院制霸」目標
 - 回覆上限由 220 字放寬到 420 字，以支援 400 字內告解回覆
 - 明確保留戀愛與親密邀請界線；本地硬攔截仍優先於 API
+
+
+## v8 學籍、學院街區與神諭冊
+
+### Railway Volume
+
+修士現在會保存玩家學籍、地點與神諭頁面，因此必須建立自己的 Railway Volume。
+
+**掛載位置請使用：**
+
+```text
+/app/storage
+```
+
+**不要掛到 `/app/data`。**  
+專案原本的教學 JSON 就放在 `/app/data` 對應的程式資料夾中；若把 Volume 掛到該位置，會遮住 `tutorials_zh_tw.json` 與 `faq_zh_tw.json`，導致修士無法啟動。
+
+Variables：
+
+```env
+MONK_DB_PATH=/app/storage/monk.db
+AI_ORACLE_ENABLED=true
+ORACLE_MAX_OUTPUT_TOKENS=700
+```
+
+### 週次規則
+
+神諭冊畫面以月份內每七天為一週：
+
+- `7-1`：7 月 1 日～7 日
+- `7-2`：7 月 8 日～14 日
+- `7-3`：7 月 15 日～21 日
+- `7-4`：7 月 22 日～28 日
+- `7-5`：7 月 29 日～月底
+
+資料庫內部會保存完整年份，例如 `2026-07-4`，避免不同年份互相覆蓋。
+
+### 神諭限制
+
+- 每名學生每週只建立一頁，不提供一般玩家無限重抽。
+- 玩家姓名只用於稱呼，不會被拿來推測創作主題。
+- 若填有固定同行者，神諭會以學生與同行者兩人為核心。
+- 商店、住處與工作室只有在玩家允許時才會被神諭採用。
+- 神諭頁面可以切換上一頁／下一頁，並標記「已完成」或「未完成」。
+- 互動按鈕在訊息開啟後可使用約 15 分鐘；失效後重新執行 `/神諭冊` 即可。

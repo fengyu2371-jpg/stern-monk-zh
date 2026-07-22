@@ -18,6 +18,10 @@ class ConfessionPromptTests(unittest.TestCase):
         self.assertIn("我把朋友的飲料喝掉了", CONFESSION_AI_INSTRUCTIONS)
         self.assertIn("我的罪是愛上你", CONFESSION_AI_INSTRUCTIONS)
         self.assertIn("隊長型修士", CONFESSION_AI_INSTRUCTIONS)
+        self.assertIn("赤木剛憲", CONFESSION_AI_INSTRUCTIONS)
+        self.assertIn("安西神父", CONFESSION_AI_INSTRUCTIONS)
+        self.assertIn("全院制霸", CONFESSION_AI_INSTRUCTIONS)
+        self.assertIn("尊重赤木學長", CONFESSION_AI_INSTRUCTIONS)
         self.assertIn("不必把自己說成犯了大錯", CONFESSION_AI_INSTRUCTIONS)
 
     def test_wraps_player_content_without_game_knowledge(self) -> None:
@@ -65,7 +69,7 @@ class ConfessionReplyTests(unittest.TestCase):
             normalize_confession_reply("   \n")
 
     def test_limits_reply_to_configured_character_cap(self) -> None:
-        reply = normalize_confession_reply("修" * 250)
+        reply = normalize_confession_reply("修" * 500)
 
         self.assertEqual(len(reply), MAX_CONFESSION_REPLY_CHARS)
         self.assertTrue(reply.endswith("…"))

@@ -12,10 +12,13 @@ class SettingsTests(unittest.TestCase):
                 "MONK_CHANNEL_ID": "456",
                 "AI_ENABLED": "true",
                 "AI_CONFESSION_ENABLED": "true",
+                "AI_ORACLE_ENABLED": "true",
                 "OPENAI_API_KEY": "test-key",
                 "OPENAI_MODEL": "gpt-5-nano",
                 "AI_DAILY_LIMIT": "5",
                 "AI_MAX_OUTPUT_TOKENS": "180",
+                "ORACLE_MAX_OUTPUT_TOKENS": "700",
+                "MONK_DB_PATH": "/tmp/monk.db",
             }
         )
 
@@ -23,6 +26,8 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.monk_channel_id, 456)
         self.assertTrue(settings.ai_available)
         self.assertTrue(settings.confession_ai_available)
+        self.assertTrue(settings.oracle_ai_available)
+        self.assertEqual(settings.monk_db_path, "/tmp/monk.db")
         self.assertEqual(settings.ai_daily_limit, 5)
 
     def test_ai_is_unavailable_without_api_key(self) -> None:

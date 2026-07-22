@@ -12,6 +12,7 @@ import discord
 from discord import app_commands
 from openai import AsyncOpenAI
 
+from academy_db import AcademyDatabase, month_week_info
 from confession import (
     CONFESSION_AI_INSTRUCTIONS,
     build_confession_input,
@@ -27,6 +28,11 @@ from knowledge import (
     render_knowledge_answer,
 )
 from openai_support import reasoning_options, response_diagnostics
+from oracle_service import (
+    generate_oracle,
+    select_weekly_keywords,
+    select_weekly_places,
+)
 from persona import (
     boundary_reply,
     confession_boundary_reply,
@@ -78,9 +84,10 @@ KNOWLEDGE = KnowledgeBase.from_files(
     DATA_DIR / "tutorials_zh_tw.json",
     DATA_DIR / "faq_zh_tw.json",
 )
+ACADEMY_DB = AcademyDatabase(SETTINGS.monk_db_path)
 
 openai_client: AsyncOpenAI | None = None
-if SETTINGS.confession_ai_available:
+if SETTINGS.confession_ai_available or SETTINGS.oracle_ai_available:
     openai_client = AsyncOpenAI(api_key=SETTINGS.openai_api_key)
 elif SETTINGS.ai_enabled:
     if not SETTINGS.openai_api_key:
@@ -207,6 +214,8 @@ class MonkClient(discord.Client):
         self.tree = MonkCommandTree(self)
 
     async def setup_hook(self) -> None:
+        ACADEMY_DB.initialize()
+        logger.info("修士學籍資料庫已初始化：%s", SETTINGS.monk_db_path)
         if SETTINGS.guild_id is not None:
             guild = discord.Object(id=SETTINGS.guild_id)
             self.tree.copy_global_to(guild=guild)
@@ -227,8 +236,9 @@ class MonkClient(discord.Client):
         )
         logger.info("修士已上線：%s（%s）", self.user, self.user.id)
         logger.info(
-            "AI 教學：永久停用｜AI 告解：%s｜模型：%s｜每日每人上限：%s",
+            "AI 教學：永久停用｜AI 告解：%s｜AI 神諭：%s｜模型：%s｜每日每人上限：%s",
             "啟用" if SETTINGS.confession_ai_available else "停用",
+            "啟用" if SETTINGS.oracle_ai_available else "停用",
             SETTINGS.openai_model,
             SETTINGS.ai_daily_limit,
         )
@@ -237,6 +247,945 @@ class MonkClient(discord.Client):
 
 client = MonkClient()
 tree = client.tree
+
+
+
+
+HOUSE_CHOICES = [
+    app_commands.Choice(name="棘鹿院", value="棘鹿院"),
+    app_commands.Choice(name="星泉院", value="星泉院"),
+    app_commands.Choice(name="灰狼院", value="灰狼院"),
+    app_commands.Choice(name="燭羽院", value="燭羽院"),
+    app_commands.Choice(name="尚未分院", value="尚未分院"),
+]
+
+PLACE_TYPE_CHOICES = [
+    app_commands.Choice(name="商店", value="商店"),
+    app_commands.Choice(name="校外住處", value="校外住處"),
+    app_commands.Choice(name="工作室", value="工作室"),
+    app_commands.Choice(name="餐館", value="餐館"),
+    app_commands.Choice(name="書店", value="書店"),
+    app_commands.Choice(name="魔藥工房", value="魔藥工房"),
+    app_commands.Choice(name="診所", value="診所"),
+    app_commands.Choice(name="社團據點", value="社團據點"),
+    app_commands.Choice(name="其他", value="其他"),
+]
+
+PLACE_SOURCE_CHOICES = [
+    app_commands.Choice(name="新登記", value="新登記"),
+    app_commands.Choice(name="舊企劃遷入", value="舊企劃遷入"),
+]
+
+
+def _yes_no(value: str, default: bool = True) -> bool:
+    normalized = value.strip().casefold()
+    if normalized in {"否", "不", "false", "no", "0", "不要"}:
+        return False
+    if normalized in {"是", "true", "yes", "1", "要", "允許"}:
+        return True
+    return default
+
+
+def student_profile_embed(profile: dict[str, Any]) -> discord.Embed:
+    prefs = profile.get("preferences", {})
+    embed = monk_embed(
+        "🎓 禊月堂魔法大學｜學生學籍",
+        f"**學生姓名**：{profile.get('student_name') or '未填寫'}\n"
+        f"**希望稱呼**：{profile.get('preferred_name') or '未填寫'}\n"
+        f"**所屬學院**：{profile.get('house') or '尚未分院'}\n"
+        f"**主修方向**：{profile.get('major') or '未填寫'}\n"
+        f"**入學年份**：{profile.get('enrollment_year') or '未填寫'}\n"
+        f"**固定同行者**：{profile.get('companion_name') or '未設定'}\n\n"
+        f"**個人簡介**\n{profile.get('introduction') or '未填寫'}",
+        color=0x5865F2,
+    )
+    embed.add_field(
+        name="神諭偏好",
+        value=(
+            f"喜歡：{prefs.get('liked_themes') or '未設定'}\n"
+            f"避免：{prefs.get('avoided_topics') or '未設定'}\n"
+            f"關鍵字：{prefs.get('creative_keywords') or '未設定'}\n"
+            f"偏好場景：{prefs.get('preferred_scenes') or '未設定'}\n"
+            f"允許使用個人地點：{'是' if prefs.get('allow_place_context', 1) else '否'}"
+        ),
+        inline=False,
+    )
+    return embed
+
+
+class UserOwnedView(discord.ui.View):
+    def __init__(self, owner_id: int, *, timeout: float | None = 900) -> None:
+        super().__init__(timeout=timeout)
+        self.owner_id = int(owner_id)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "這份資料屬於其他學生，不能代替操作。",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+
+class OraclePreferencesModal(discord.ui.Modal, title="神諭偏好設定"):
+    liked_themes = discord.ui.TextInput(
+        label="喜歡的題材與氣氛",
+        placeholder="雨天、旅行、照顧、魔法學院日常",
+        required=False,
+        max_length=300,
+    )
+    avoided_topics = discord.ui.TextInput(
+        label="希望避免的題材",
+        placeholder="第三者、血腥、分離、爭吵",
+        required=False,
+        max_length=300,
+    )
+    creative_keywords = discord.ui.TextInput(
+        label="可使用的創作關鍵字",
+        placeholder="圖書館、斗篷、熱可可、月光",
+        required=False,
+        max_length=400,
+    )
+    preferred_scenes = discord.ui.TextInput(
+        label="偏好場景",
+        placeholder="商店街、校外住處、旅行、季節活動",
+        required=False,
+        max_length=300,
+    )
+    allow_places = discord.ui.TextInput(
+        label="允許神諭使用你登記的地點？",
+        placeholder="填「是」或「否」",
+        default="是",
+        required=True,
+        max_length=10,
+    )
+
+    def __init__(
+        self,
+        user_id: int,
+        existing: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__()
+        self.user_id = int(user_id)
+        existing = existing or {}
+        self.liked_themes.default = existing.get("liked_themes", "")
+        self.avoided_topics.default = existing.get("avoided_topics", "")
+        self.creative_keywords.default = existing.get("creative_keywords", "")
+        self.preferred_scenes.default = existing.get("preferred_scenes", "")
+        self.allow_places.default = (
+            "是" if existing.get("allow_place_context", 1) else "否"
+        )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if ACADEMY_DB.get_profile(self.user_id) is None:
+            await interaction.response.send_message(
+                "請先使用 `/入學登記` 建立學籍。",
+                ephemeral=True,
+            )
+            return
+
+        ACADEMY_DB.save_preferences(
+            user_id=self.user_id,
+            liked_themes=str(self.liked_themes.value),
+            avoided_topics=str(self.avoided_topics.value),
+            creative_keywords=str(self.creative_keywords.value),
+            preferred_scenes=str(self.preferred_scenes.value),
+            allow_place_context=_yes_no(str(self.allow_places.value)),
+        )
+        await interaction.response.send_message(
+            "神諭偏好已保存。姓名只會用於稱呼，不會被拿來推測神諭主題。",
+            ephemeral=True,
+        )
+
+
+class ProfileNextStepView(UserOwnedView):
+    @discord.ui.button(
+        label="補充神諭偏好",
+        style=discord.ButtonStyle.primary,
+        emoji="📖",
+    )
+    async def open_preferences(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        existing = ACADEMY_DB.get_preferences(self.owner_id)
+        await interaction.response.send_modal(
+            OraclePreferencesModal(self.owner_id, existing)
+        )
+
+
+class EnrollmentModal(discord.ui.Modal, title="禊月堂魔法大學｜入學登記"):
+    student_name = discord.ui.TextInput(
+        label="學生姓名／角色名稱",
+        required=True,
+        max_length=50,
+    )
+    preferred_name = discord.ui.TextInput(
+        label="希望大家怎麼稱呼你",
+        required=True,
+        max_length=50,
+    )
+    major = discord.ui.TextInput(
+        label="主修方向",
+        placeholder="魔藥、魔法生物、道具研究、尚未決定",
+        required=False,
+        max_length=80,
+    )
+    companion_name = discord.ui.TextInput(
+        label="固定同行者／伴侶稱呼（可留白）",
+        required=False,
+        max_length=50,
+    )
+    introduction = discord.ui.TextInput(
+        label="個人簡介",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=600,
+    )
+
+    def __init__(
+        self,
+        *,
+        user_id: int,
+        house: str,
+        enrollment_year: str,
+        existing: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__()
+        self.user_id = int(user_id)
+        self.house = house
+        self.enrollment_year = enrollment_year
+        existing = existing or {}
+
+        self.student_name.default = existing.get("student_name", "")
+        self.preferred_name.default = existing.get("preferred_name", "")
+        self.major.default = existing.get("major", "")
+        self.companion_name.default = existing.get("companion_name", "")
+        self.introduction.default = existing.get("introduction", "")
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        ACADEMY_DB.save_profile(
+            user_id=self.user_id,
+            student_name=str(self.student_name.value),
+            preferred_name=str(self.preferred_name.value),
+            house=self.house,
+            major=str(self.major.value),
+            enrollment_year=self.enrollment_year,
+            introduction=str(self.introduction.value),
+            companion_name=str(self.companion_name.value),
+        )
+
+        await interaction.response.send_message(
+            embed=monk_embed(
+                "✅ 入學資料已保存",
+                f"{self.preferred_name.value}，學籍已登記至 **{self.house}**。\n\n"
+                "接著可以補充神諭偏好，也可以登記商店、住處或工作室。",
+                color=0x3BA55D,
+            ),
+            view=ProfileNextStepView(self.user_id),
+            ephemeral=True,
+        )
+
+
+class DeleteProfileView(UserOwnedView):
+    @discord.ui.button(
+        label="確認刪除學籍",
+        style=discord.ButtonStyle.danger,
+        emoji="🗑️",
+    )
+    async def confirm_delete(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        deleted = ACADEMY_DB.delete_profile(self.owner_id)
+        self.stop()
+        await interaction.response.edit_message(
+            content=(
+                "學籍、個人地點與神諭冊已刪除。"
+                if deleted
+                else "目前沒有可刪除的學籍。"
+            ),
+            embed=None,
+            view=None,
+        )
+
+    @discord.ui.button(
+        label="取消",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def cancel_delete(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        self.stop()
+        await interaction.response.edit_message(
+            content="已取消刪除。",
+            embed=None,
+            view=None,
+        )
+
+
+class PlaceModal(discord.ui.Modal, title="學院街區｜地點登記"):
+    place_name = discord.ui.TextInput(
+        label="地點名稱",
+        placeholder="不會製藥株式會社／月影公寓三樓",
+        required=True,
+        max_length=80,
+    )
+    district = discord.ui.TextInput(
+        label="所在區域",
+        placeholder="學院城東街／星泉河畔／校外住宅區",
+        required=False,
+        max_length=80,
+    )
+    description = discord.ui.TextInput(
+        label="地點簡介",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=700,
+    )
+    status = discord.ui.TextInput(
+        label="目前狀態",
+        placeholder="營業中／使用中／等待重新開張",
+        default="使用中",
+        required=True,
+        max_length=40,
+    )
+
+    def __init__(
+        self,
+        *,
+        user_id: int,
+        place_type: str,
+        source_kind: str,
+        allow_oracle: bool,
+        is_public: bool,
+    ) -> None:
+        super().__init__()
+        self.user_id = int(user_id)
+        self.place_type = place_type
+        self.source_kind = source_kind
+        self.allow_oracle = allow_oracle
+        self.is_public = is_public
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if ACADEMY_DB.get_profile(self.user_id) is None:
+            await interaction.response.send_message(
+                "請先完成 `/入學登記`，再登記個人地點。",
+                ephemeral=True,
+            )
+            return
+
+        place_id = ACADEMY_DB.create_place(
+            user_id=self.user_id,
+            name=str(self.place_name.value),
+            place_type=self.place_type,
+            district=str(self.district.value),
+            description=str(self.description.value),
+            source_kind=self.source_kind,
+            status=str(self.status.value),
+            allow_oracle=self.allow_oracle,
+            is_public=self.is_public,
+        )
+
+        await interaction.response.send_message(
+            embed=monk_embed(
+                "🏘️ 地點登記完成",
+                f"**{self.place_name.value}** 已加入學院街區資料。\n\n"
+                f"類型：{self.place_type}\n"
+                f"來源：{self.source_kind}\n"
+                f"公開：{'是' if self.is_public else '否'}\n"
+                f"允許神諭使用：{'是' if self.allow_oracle else '否'}\n"
+                f"地點編號：{place_id}",
+                color=0x8B6F47,
+            ),
+            ephemeral=True,
+        )
+
+
+def place_embed(
+    place: dict[str, Any],
+    *,
+    index: int,
+    total: int,
+) -> discord.Embed:
+    embed = monk_embed(
+        f"🏘️ 學院街區｜{place['name']}",
+        f"**類型**：{place['place_type']}\n"
+        f"**經營者／居住者**：{place.get('owner_name') or '未公開'}\n"
+        f"**區域**：{place.get('district') or '未設定'}\n"
+        f"**狀態**：{place.get('status') or '未設定'}\n"
+        f"**來源**：{place.get('source_kind') or '新登記'}\n\n"
+        f"{place.get('description') or '沒有簡介。'}",
+        color=0x8B6F47,
+    )
+    embed.set_footer(text=f"地點 {index + 1}／{total}")
+    return embed
+
+
+class PlacesView(discord.ui.View):
+    def __init__(self, places: list[dict[str, Any]]) -> None:
+        super().__init__(timeout=900)
+        self.places = places
+        self.index = 0
+        self._refresh_buttons()
+
+    def _refresh_buttons(self) -> None:
+        self.previous_page.disabled = self.index <= 0
+        self.next_page.disabled = self.index >= len(self.places) - 1
+
+    def current_embed(self) -> discord.Embed:
+        return place_embed(
+            self.places[self.index],
+            index=self.index,
+            total=len(self.places),
+        )
+
+    @discord.ui.button(
+        label="上一頁",
+        style=discord.ButtonStyle.secondary,
+        emoji="◀️",
+    )
+    async def previous_page(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        self.index = max(0, self.index - 1)
+        self._refresh_buttons()
+        await interaction.response.edit_message(
+            embed=self.current_embed(),
+            view=self,
+        )
+
+    @discord.ui.button(
+        label="下一頁",
+        style=discord.ButtonStyle.secondary,
+        emoji="▶️",
+    )
+    async def next_page(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        self.index = min(len(self.places) - 1, self.index + 1)
+        self._refresh_buttons()
+        await interaction.response.edit_message(
+            embed=self.current_embed(),
+            view=self,
+        )
+
+
+def oracle_page_embed(
+    page: dict[str, Any],
+    *,
+    index: int,
+    total: int,
+) -> discord.Embed:
+    status_icon = "✅" if page["status"] == "已完成" else "⬜"
+    embed = monk_embed(
+        f"📖 禊月堂個人神諭冊｜{page['week_label']}",
+        f"**期間**：{page['period_start']}～{page['period_end']}\n"
+        f"**狀態**：{status_icon} {page['status']}\n\n"
+        f"{page['oracle_text']}",
+        color=0x7A5AC8,
+    )
+
+    if page.get("used_keywords"):
+        embed.add_field(
+            name="本頁創作關鍵字",
+            value=page["used_keywords"],
+            inline=False,
+        )
+    if page.get("used_place_names"):
+        embed.add_field(
+            name="本頁可能使用的學院地點",
+            value=page["used_place_names"],
+            inline=False,
+        )
+    if page.get("completed_at"):
+        embed.add_field(
+            name="完成紀錄",
+            value=page["completed_at"],
+            inline=False,
+        )
+
+    embed.set_footer(
+        text=f"神諭頁 {index + 1}／{total}｜內部週次 {page['week_key']}"
+    )
+    return embed
+
+
+class OracleBookView(UserOwnedView):
+    def __init__(
+        self,
+        owner_id: int,
+        pages: list[dict[str, Any]],
+        *,
+        index: int | None = None,
+    ) -> None:
+        super().__init__(owner_id, timeout=900)
+        self.pages = pages
+        self.index = len(pages) - 1 if index is None else index
+        self._refresh_buttons()
+
+    def _refresh_buttons(self) -> None:
+        self.previous_page.disabled = self.index <= 0
+        self.next_page.disabled = self.index >= len(self.pages) - 1
+        page = self.pages[self.index]
+        self.mark_done.disabled = page["status"] == "已完成"
+        self.mark_undone.disabled = page["status"] == "未完成"
+
+    def current_embed(self) -> discord.Embed:
+        return oracle_page_embed(
+            self.pages[self.index],
+            index=self.index,
+            total=len(self.pages),
+        )
+
+    @discord.ui.button(
+        label="上一頁",
+        style=discord.ButtonStyle.secondary,
+        emoji="◀️",
+    )
+    async def previous_page(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        self.index = max(0, self.index - 1)
+        self._refresh_buttons()
+        await interaction.response.edit_message(
+            embed=self.current_embed(),
+            view=self,
+        )
+
+    @discord.ui.button(
+        label="標記已完成",
+        style=discord.ButtonStyle.success,
+        emoji="✅",
+    )
+    async def mark_done(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        page = self.pages[self.index]
+        updated = ACADEMY_DB.set_oracle_status(
+            page_id=int(page["id"]),
+            user_id=self.owner_id,
+            status="已完成",
+        )
+        if updated is None:
+            await interaction.response.send_message(
+                "找不到這一頁神諭。",
+                ephemeral=True,
+            )
+            return
+        self.pages[self.index] = updated
+        self._refresh_buttons()
+        await interaction.response.edit_message(
+            embed=self.current_embed(),
+            view=self,
+        )
+
+    @discord.ui.button(
+        label="標記未完成",
+        style=discord.ButtonStyle.primary,
+        emoji="⬜",
+    )
+    async def mark_undone(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        page = self.pages[self.index]
+        updated = ACADEMY_DB.set_oracle_status(
+            page_id=int(page["id"]),
+            user_id=self.owner_id,
+            status="未完成",
+        )
+        if updated is None:
+            await interaction.response.send_message(
+                "找不到這一頁神諭。",
+                ephemeral=True,
+            )
+            return
+        self.pages[self.index] = updated
+        self._refresh_buttons()
+        await interaction.response.edit_message(
+            embed=self.current_embed(),
+            view=self,
+        )
+
+    @discord.ui.button(
+        label="下一頁",
+        style=discord.ButtonStyle.secondary,
+        emoji="▶️",
+    )
+    async def next_page(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        self.index = min(len(self.pages) - 1, self.index + 1)
+        self._refresh_buttons()
+        await interaction.response.edit_message(
+            embed=self.current_embed(),
+            view=self,
+        )
+
+
+@tree.command(
+    name="入學登記",
+    description="填寫魔法大學入學資料",
+)
+@app_commands.describe(
+    學院="目前所屬學院",
+    入學年份="例如 2026；可留白",
+)
+@app_commands.choices(學院=HOUSE_CHOICES)
+async def enroll_student(
+    interaction: discord.Interaction,
+    學院: app_commands.Choice[str],
+    入學年份: app_commands.Range[str, 0, 12] = "",
+) -> None:
+    existing = ACADEMY_DB.get_profile(interaction.user.id)
+    await interaction.response.send_modal(
+        EnrollmentModal(
+            user_id=interaction.user.id,
+            house=學院.value,
+            enrollment_year=str(入學年份),
+            existing=existing,
+        )
+    )
+
+
+@tree.command(
+    name="我的學籍",
+    description="查看自己的入學資料與神諭偏好",
+)
+async def my_student_profile(interaction: discord.Interaction) -> None:
+    profile = ACADEMY_DB.get_profile_bundle(interaction.user.id)
+    if profile is None:
+        await interaction.response.send_message(
+            "尚未建立學籍。請先使用 `/入學登記`。",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.send_message(
+        embed=student_profile_embed(profile),
+        ephemeral=True,
+    )
+
+
+@tree.command(
+    name="修改學籍",
+    description="修改自己的魔法大學入學資料",
+)
+@app_commands.describe(
+    學院="更新後的學院；不填則保留原本設定",
+    入學年份="更新後的入學年份；不填則保留原本設定",
+)
+@app_commands.choices(學院=HOUSE_CHOICES)
+async def edit_student_profile(
+    interaction: discord.Interaction,
+    學院: app_commands.Choice[str] | None = None,
+    入學年份: app_commands.Range[str, 0, 12] | None = None,
+) -> None:
+    existing = ACADEMY_DB.get_profile(interaction.user.id)
+    if existing is None:
+        await interaction.response.send_message(
+            "尚未建立學籍。請先使用 `/入學登記`。",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_modal(
+        EnrollmentModal(
+            user_id=interaction.user.id,
+            house=學院.value if 學院 else existing["house"],
+            enrollment_year=(
+                str(入學年份)
+                if 入學年份 is not None
+                else existing["enrollment_year"]
+            ),
+            existing=existing,
+        )
+    )
+
+
+@tree.command(
+    name="神諭偏好",
+    description="設定神諭創作偏好與避免題材",
+)
+async def oracle_preferences(interaction: discord.Interaction) -> None:
+    if ACADEMY_DB.get_profile(interaction.user.id) is None:
+        await interaction.response.send_message(
+            "請先使用 `/入學登記` 建立學籍。",
+            ephemeral=True,
+        )
+        return
+    existing = ACADEMY_DB.get_preferences(interaction.user.id)
+    await interaction.response.send_modal(
+        OraclePreferencesModal(interaction.user.id, existing)
+    )
+
+
+@tree.command(
+    name="刪除學籍",
+    description="刪除自己的學籍、個人地點與神諭冊",
+)
+async def delete_student_profile(interaction: discord.Interaction) -> None:
+    if ACADEMY_DB.get_profile(interaction.user.id) is None:
+        await interaction.response.send_message(
+            "目前沒有可刪除的學籍。",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message(
+        "這會同時刪除你的學籍、神諭偏好、個人地點與神諭頁面。確定要繼續嗎？",
+        view=DeleteProfileView(interaction.user.id),
+        ephemeral=True,
+    )
+
+
+@tree.command(
+    name="地點登記",
+    description="把商店、住處或舊企劃地點登記進學院街區",
+)
+@app_commands.describe(
+    類型="商店、住處或其他地點類型",
+    來源="新地點或舊企劃遷入",
+    允許神諭使用="是否允許每週神諭採用這個地點",
+    是否公開="是否出現在公開學院街區",
+)
+@app_commands.choices(
+    類型=PLACE_TYPE_CHOICES,
+    來源=PLACE_SOURCE_CHOICES,
+)
+async def register_place(
+    interaction: discord.Interaction,
+    類型: app_commands.Choice[str],
+    來源: app_commands.Choice[str],
+    允許神諭使用: bool = True,
+    是否公開: bool = True,
+) -> None:
+    if ACADEMY_DB.get_profile(interaction.user.id) is None:
+        await interaction.response.send_message(
+            "請先完成 `/入學登記`，再登記個人地點。",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_modal(
+        PlaceModal(
+            user_id=interaction.user.id,
+            place_type=類型.value,
+            source_kind=來源.value,
+            allow_oracle=允許神諭使用,
+            is_public=是否公開,
+        )
+    )
+
+
+@tree.command(
+    name="我的地點",
+    description="查看自己登記的商店、住處與工作室",
+)
+async def my_places(interaction: discord.Interaction) -> None:
+    places = ACADEMY_DB.list_user_places(interaction.user.id)
+    if not places:
+        await interaction.response.send_message(
+            "目前沒有登記地點。可以使用 `/地點登記` 建立商店、住處或遷入舊企劃。",
+            ephemeral=True,
+        )
+        return
+
+    lines = []
+    for place in places[:20]:
+        lines.append(
+            f"**#{place['id']}｜{place['name']}**\n"
+            f"{place['place_type']}｜{place['status']}｜"
+            f"{'公開' if place['is_public'] else '不公開'}｜"
+            f"{'可進神諭' if place['allow_oracle'] else '不進神諭'}"
+        )
+
+    await interaction.response.send_message(
+        embed=monk_embed(
+            "🏘️ 我的學院街區地點",
+            "\n\n".join(lines),
+            color=0x8B6F47,
+        ),
+        ephemeral=True,
+    )
+
+
+@tree.command(
+    name="學院街區",
+    description="一頁一頁查看學生公開的商店與校外居住地",
+)
+@app_commands.describe(類型="可選擇只查看某一類型")
+@app_commands.choices(類型=PLACE_TYPE_CHOICES)
+async def campus_district(
+    interaction: discord.Interaction,
+    類型: app_commands.Choice[str] | None = None,
+) -> None:
+    places = ACADEMY_DB.list_public_places(
+        類型.value if 類型 else None
+    )
+    if not places:
+        await interaction.response.send_message(
+            "目前沒有符合條件的公開地點。",
+            ephemeral=True,
+        )
+        return
+
+    view = PlacesView(places)
+    await interaction.response.send_message(
+        embed=view.current_embed(),
+        view=view,
+    )
+
+
+@tree.command(
+    name="本週神諭",
+    description="建立或查看本週神諭頁面",
+)
+async def current_week_oracle(interaction: discord.Interaction) -> None:
+    profile = ACADEMY_DB.get_profile_bundle(interaction.user.id)
+    if profile is None:
+        await interaction.response.send_message(
+            "請先使用 `/入學登記` 建立學籍。",
+            ephemeral=True,
+        )
+        return
+
+    week = month_week_info()
+    existing_page = ACADEMY_DB.get_oracle_by_week(
+        interaction.user.id,
+        week.key,
+    )
+
+    if existing_page is None:
+        if openai_client is None or not SETTINGS.oracle_ai_available:
+            await interaction.response.send_message(
+                "本週尚未建立神諭，而且 AI 神諭目前未啟用。"
+                "請確認 `AI_ORACLE_ENABLED=true` 與 API Key。",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        preferences = profile.get("preferences", {})
+        all_places = (
+            ACADEMY_DB.list_oracle_places(interaction.user.id)
+            if preferences.get("allow_place_context", 1)
+            else []
+        )
+        weekly_keywords = select_weekly_keywords(
+            user_id=interaction.user.id,
+            week_key=week.key,
+            creative_keywords=preferences.get("creative_keywords", ""),
+            liked_themes=preferences.get("liked_themes", ""),
+            preferred_scenes=preferences.get("preferred_scenes", ""),
+        )
+        weekly_places = select_weekly_places(
+            user_id=interaction.user.id,
+            week_key=week.key,
+            places=all_places,
+        )
+
+        try:
+            oracle_text = await generate_oracle(
+                client=openai_client,
+                model=SETTINGS.openai_model,
+                max_output_tokens=SETTINGS.oracle_max_output_tokens,
+                user_id=interaction.user.id,
+                profile=profile,
+                preferences=preferences,
+                places=weekly_places,
+                week=week,
+                weekly_keywords=weekly_keywords,
+            )
+        except Exception:
+            logger.exception("OpenAI API 神諭生成失敗")
+            await interaction.followup.send(
+                "本週神諭生成失敗。請稍後再試，或請管理員查看 Railway 紀錄。",
+                ephemeral=True,
+            )
+            return
+
+        existing_page = ACADEMY_DB.create_oracle(
+            user_id=interaction.user.id,
+            week=week,
+            oracle_text=oracle_text,
+            used_keywords="、".join(weekly_keywords),
+            used_place_names="、".join(
+                place["name"] for place in weekly_places
+            ),
+        )
+
+        pages = ACADEMY_DB.list_oracles(interaction.user.id)
+        index = next(
+            i for i, page in enumerate(pages)
+            if page["id"] == existing_page["id"]
+        )
+        view = OracleBookView(
+            interaction.user.id,
+            pages,
+            index=index,
+        )
+        await interaction.followup.send(
+            embed=view.current_embed(),
+            view=view,
+            ephemeral=True,
+        )
+        return
+
+    pages = ACADEMY_DB.list_oracles(interaction.user.id)
+    index = next(
+        i for i, page in enumerate(pages)
+        if page["id"] == existing_page["id"]
+    )
+    view = OracleBookView(
+        interaction.user.id,
+        pages,
+        index=index,
+    )
+    await interaction.response.send_message(
+        embed=view.current_embed(),
+        view=view,
+        ephemeral=True,
+    )
+
+
+@tree.command(
+    name="神諭冊",
+    description="一頁一頁查看歷週神諭並標記完成狀態",
+)
+async def oracle_book(interaction: discord.Interaction) -> None:
+    pages = ACADEMY_DB.list_oracles(interaction.user.id)
+    if not pages:
+        await interaction.response.send_message(
+            "神諭冊目前是空的。請先使用 `/本週神諭` 建立第一頁。",
+            ephemeral=True,
+        )
+        return
+
+    view = OracleBookView(interaction.user.id, pages)
+    await interaction.response.send_message(
+        embed=view.current_embed(),
+        view=view,
+        ephemeral=True,
+    )
+
 
 
 @tree.command(
@@ -455,10 +1404,13 @@ async def monk_confession(
 )
 async def monk_status(interaction: discord.Interaction) -> None:
     confession_ai_status = "已啟用" if SETTINGS.confession_ai_available else "未啟用"
+    oracle_ai_status = "已啟用" if SETTINGS.oracle_ai_available else "未啟用"
     await interaction.response.send_message(
         "修士目前在線，教學與規則查詢可正常使用。\n\n"
         "AI 教學：**永久停用**\n"
         f"AI 告解：**{confession_ai_status}**\n"
+        f"AI 神諭：**{oracle_ai_status}**\n"
+        f"學籍資料庫：**已啟用**\n"
         f"指定頻道：<#{SETTINGS.monk_channel_id}>",
         ephemeral=True,
     )

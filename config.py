@@ -50,10 +50,13 @@ class Settings:
     monk_channel_id: int | None
     ai_enabled: bool
     ai_confession_enabled: bool
+    ai_oracle_enabled: bool
     openai_api_key: str
     openai_model: str
     ai_daily_limit: int
     ai_max_output_tokens: int
+    oracle_max_output_tokens: int
+    monk_db_path: str
 
     @property
     def ai_available(self) -> bool:
@@ -63,6 +66,10 @@ class Settings:
     def confession_ai_available(self) -> bool:
         return self.ai_available and self.ai_confession_enabled
 
+    @property
+    def oracle_ai_available(self) -> bool:
+        return self.ai_available and self.ai_oracle_enabled
+
     @classmethod
     def from_mapping(cls, values: Mapping[str, str]) -> "Settings":
         guild_id = _read_int(values, "GUILD_ID", None, minimum=1)
@@ -70,6 +77,9 @@ class Settings:
         ai_daily_limit = _read_int(values, "AI_DAILY_LIMIT", 5, minimum=0)
         ai_max_output_tokens = _read_int(
             values, "AI_MAX_OUTPUT_TOKENS", 180, minimum=50
+        )
+        oracle_max_output_tokens = _read_int(
+            values, "ORACLE_MAX_OUTPUT_TOKENS", 700, minimum=100
         )
 
         return cls(
@@ -80,11 +90,18 @@ class Settings:
             ai_confession_enabled=_read_bool(
                 values, "AI_CONFESSION_ENABLED", True
             ),
+            ai_oracle_enabled=_read_bool(
+                values, "AI_ORACLE_ENABLED", True
+            ),
             openai_api_key=str(values.get("OPENAI_API_KEY", "")).strip(),
             openai_model=str(values.get("OPENAI_MODEL", "gpt-5-nano")).strip()
             or "gpt-5-nano",
             ai_daily_limit=int(ai_daily_limit),
             ai_max_output_tokens=int(ai_max_output_tokens),
+            oracle_max_output_tokens=int(oracle_max_output_tokens),
+            monk_db_path=str(
+                values.get("MONK_DB_PATH", "/app/storage/monk.db")
+            ).strip() or "/app/storage/monk.db",
         )
 
     @classmethod

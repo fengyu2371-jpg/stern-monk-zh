@@ -38,6 +38,26 @@ class BotPolicyTests(unittest.TestCase):
 
         self.assertEqual(callers, ["monk_confession"])
 
+    def test_oracle_openai_is_only_called_by_current_week_command(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1] / "monk_bot.py"
+        ).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        callers: list[str] = []
+
+        for function in (
+            node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef)
+        ):
+            if any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "generate_oracle"
+                for node in ast.walk(function)
+            ):
+                callers.append(function.name)
+
+        self.assertEqual(callers, ["current_week_oracle"])
+
     def test_confession_response_is_stored_for_openai_logs(self) -> None:
         source = (
             Path(__file__).resolve().parents[1] / "monk_bot.py"
@@ -101,3 +121,28 @@ class BotPolicyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CampusFeatureTests(unittest.TestCase):
+    def test_campus_commands_exist(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1] / "monk_bot.py"
+        ).read_text(encoding="utf-8")
+
+        for command_name in (
+            "入學登記",
+            "我的學籍",
+            "地點登記",
+            "學院街區",
+            "本週神諭",
+            "神諭冊",
+        ):
+            self.assertIn(f'name="{command_name}"', source)
+
+    def test_database_is_not_church_db(self) -> None:
+        config_source = (
+            Path(__file__).resolve().parents[1] / "config.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("/app/storage/monk.db", config_source)
+        self.assertNotIn("church.db", config_source)
