@@ -2038,6 +2038,24 @@ def monk_embed(
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
 
 
+def locked_operation_embed(
+    *,
+    owner_name: str | None = None,
+) -> discord.Embed:
+    display_name = owner_name or "這位學生"
+    embed = monk_embed(
+        "🔒 操作畫面已鎖定",
+        f"**{display_name}** 的操作畫面已超過 5 分鐘沒有互動。\n\n"
+        "為避免他人誤觸，所有按鈕與選單已關閉。\n"
+        "需要繼續操作時，請重新輸入 `/學生資料`。",
+        color=0x747F8D,
+    )
+    embed.set_footer(
+        text="公開資料內容不會被刪除；只有操作入口已關閉。"
+    )
+    return embed
+
+
 def personal_panel_embed(
     user_id: int,
     display_name: str | None = None,
@@ -2122,19 +2140,16 @@ class PlayerPanelSession:
 
         clear_player_panel_session(self, cancel_task=False)
         try:
-            # 保留目前公開資料畫面，只移除操作元件。
-            # 玩家要再次操作時必須重新輸入 /學生資料。
-            embeds = list(self.message.embeds)
-            if embeds:
-                embed = embeds[0].copy()
-                embed.set_footer(
-                    text="🔒 操作入口已關閉。需要繼續操作時，請重新輸入 /學生資料。"
-                )
-                await self.message.edit(embed=embed, view=None)
-            else:
-                await self.message.edit(view=None)
+            # 不論目前停在哪一頁，逾時後統一切換成鎖定畫面。
+            await self.message.edit(
+                content=None,
+                embed=locked_operation_embed(
+                    owner_name=self.owner_name,
+                ),
+                view=None,
+            )
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            logger.exception("玩家修士面板逾時關閉失敗。")
+            logger.exception("玩家修士面板逾時鎖定失敗。")
 
 
 ACTIVE_PLAYER_PANELS: dict[int, PlayerPanelSession] = {}
@@ -2232,7 +2247,7 @@ async def edit_player_panel_from_modal(
     session = current_player_panel(owner_id)
     if session is None:
         await interaction.response.send_message(
-            "這張學生資料的操作入口已關閉。"
+            "這張操作畫面已超過 5 分鐘沒有互動並已鎖定。"
             "請重新輸入 `/學生資料`。",
             ephemeral=True,
         )
