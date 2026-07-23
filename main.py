@@ -2009,17 +2009,15 @@ KNOWLEDGE = KnowledgeBase.from_files(
 ACADEMY_DB = AcademyDatabase(SETTINGS.monk_db_path)
 
 openai_client: AsyncOpenAI | None = None
-if SETTINGS.confession_ai_available or SETTINGS.oracle_ai_available:
+if SETTINGS.ai_available:
     openai_client = AsyncOpenAI(api_key=SETTINGS.openai_api_key)
-elif SETTINGS.ai_enabled:
-    if not SETTINGS.openai_api_key:
-        logger.warning("AI_ENABLED=true，但沒有設定 OPENAI_API_KEY；AI 功能將停用。")
-    else:
-        logger.info("AI 總開關已啟用，但告解 AI 目前為關閉。")
+elif SETTINGS.ai_enabled and not SETTINGS.openai_api_key:
+    logger.warning("AI_ENABLED=true，但沒有設定 OPENAI_API_KEY；AI 功能將停用。")
 
 
 CONFESSION_USAGE_SCOPE = "confession_day"
 ORACLE_USAGE_SCOPE = "oracle_week"
+OUTFIT_USAGE_SCOPE = "outfit_day"
 
 
 def monk_embed(
@@ -2336,6 +2334,422 @@ async def ask_openai_confession(
     return normalize_confession_reply(output_text)
 
 
+
+OUTFIT_DIRECTIONS = {
+    "male": "男裝",
+    "female": "女裝",
+    "neutral": "無性別穿搭",
+    "random": "隨機",
+}
+
+OUTFIT_AI_INSTRUCTIONS = """
+你是禊月堂魔法大學的赤木修士，負責給學生今日穿搭建議。
+使用臺灣繁體中文，不使用中國用語。
+口吻是隊長型學長：沉穩、直接、可靠，可以有乾式幽默。
+不要神父式祝福，不要戀愛曖昧，不要像約會邀請。
+不得假設使用者的性別、身材、年齡、真實身分、收入、預算。
+穿搭方向是風格分類，不代表穿著者的性別。
+避免色情、過度暴露、身材曲線描寫、昂貴品牌指定。
+不要指定名牌；可使用一般品項，例如襯衫、長褲、外套、球鞋、包、髮飾。
+輸出必須是 JSON，不要 Markdown，不要多餘說明。
+JSON 格式：
+{
+  "title": "今日穿搭標題，16字以內",
+  "direction": "男裝/女裝/無性別穿搭/隨機",
+  "summary": "一句總結，40字以內",
+  "items": ["3到5個穿搭品項"],
+  "details": ["3到4個搭配重點"],
+  "captain_note": "赤木修士口吻的一句短評，50字以內"
+}
+""".strip()
+
+
+def sanitize_outfit_keywords(raw: str) -> str:
+    cleaned = " ".join(str(raw or "").replace("\n", " ").split())
+    return cleaned[:180]
+
+
+def choose_outfit_direction(direction_key: str) -> str:
+    if direction_key == "random":
+        return random.choice(["男裝", "女裝", "無性別穿搭"])
+    return OUTFIT_DIRECTIONS.get(direction_key, "無性別穿搭")
+
+
+def outfit_fallback(
+    *,
+    direction: str,
+    keywords: str,
+) -> dict[str, Any]:
+    keyword_text = keywords or "日常、好活動、不要太複雜"
+    base_items: dict[str, list[str]] = {
+        "男裝": [
+            "乾淨素色上衣",
+            "直筒長褲",
+            "輕薄外套",
+            "好走球鞋",
+            "小型側背包",
+        ],
+        "女裝": [
+            "俐落襯衫或針織上衣",
+            "長裙或寬褲",
+            "薄外套",
+            "低調配件",
+            "好走鞋款",
+        ],
+        "無性別穿搭": [
+            "寬鬆上衣",
+            "直筒或工裝褲",
+            "中性色外套",
+            "簡潔球鞋",
+            "帆布包或後背包",
+        ],
+    }
+    items = base_items.get(direction, base_items["無性別穿搭"])
+    return {
+        "title": f"{direction}｜今日整備",
+        "direction": direction,
+        "summary": f"以「{keyword_text}」為核心，整理成能走動、能見人的配置。",
+        "items": items,
+        "details": [
+            "上半身保持乾淨線條，不必堆太多層次。",
+            "下身選好活動的版型，坐下、走路、通勤都不要卡。",
+            "配件控制在一到兩個重點，避免整套像道具欄爆滿。",
+            "鞋子優先選能久走的款式；今天不是跟腳後跟決鬥。",
+        ],
+        "captain_note": "穿搭不是上戰場，但也別穿得像剛從補考考場爬出來。",
+    }
+
+
+def normalize_outfit_payload(
+    payload: Any,
+    *,
+    direction: str,
+    keywords: str,
+) -> dict[str, Any]:
+    fallback = outfit_fallback(direction=direction, keywords=keywords)
+    if not isinstance(payload, dict):
+        return fallback
+
+    title = str(payload.get("title") or fallback["title"]).strip()[:40]
+    summary = str(payload.get("summary") or fallback["summary"]).strip()[:120]
+    captain_note = str(
+        payload.get("captain_note") or fallback["captain_note"]
+    ).strip()[:120]
+
+    raw_items = payload.get("items")
+    items = [
+        str(item).strip()[:80]
+        for item in raw_items
+        if isinstance(item, (str, int, float)) and str(item).strip()
+    ] if isinstance(raw_items, list) else []
+    if not items:
+        items = fallback["items"]
+
+    raw_details = payload.get("details")
+    details = [
+        str(item).strip()[:120]
+        for item in raw_details
+        if isinstance(item, (str, int, float)) and str(item).strip()
+    ] if isinstance(raw_details, list) else []
+    if not details:
+        details = fallback["details"]
+
+    return {
+        "title": title,
+        "direction": direction,
+        "summary": summary,
+        "items": items[:5],
+        "details": details[:4],
+        "captain_note": captain_note,
+    }
+
+
+def parse_outfit_json(text: str) -> dict[str, Any]:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        raise ValueError("空輸出")
+
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", cleaned, flags=re.S)
+        if match is None:
+            raise
+        return json.loads(match.group(0))
+
+
+def build_outfit_input(
+    *,
+    direction: str,
+    keywords: str,
+) -> str:
+    # 重要：不要放入 Discord 顯示名稱、學生姓名、user_id 或任何可識別玩家身分的資訊。
+    return (
+        f"穿搭方向：{direction}\n"
+        f"玩家輸入關鍵詞：{keywords or '未提供'}\n\n"
+        "請依照系統指示產生今日穿搭推薦 JSON。"
+    )
+
+
+async def generate_outfit_recommendation(
+    *,
+    direction: str,
+    keywords: str,
+    user_id: int,
+) -> tuple[dict[str, Any], bool]:
+    if openai_client is None or not SETTINGS.ai_available:
+        return outfit_fallback(direction=direction, keywords=keywords), False
+
+    response = await openai_client.responses.create(
+        model=SETTINGS.openai_model,
+        instructions=OUTFIT_AI_INSTRUCTIONS,
+        input=build_outfit_input(
+            direction=direction,
+            keywords=keywords,
+        ),
+        max_output_tokens=max(300, SETTINGS.ai_max_output_tokens),
+        store=True,
+        safety_identifier=f"discord:{user_id}:outfit",
+        **reasoning_options(SETTINGS.openai_model),
+    )
+
+    output_text = response.output_text or ""
+    payload = parse_outfit_json(output_text)
+    return (
+        normalize_outfit_payload(
+            payload,
+            direction=direction,
+            keywords=keywords,
+        ),
+        True,
+    )
+
+
+def outfit_embed(
+    data: dict[str, Any],
+    *,
+    fallback_used: bool,
+    remaining: int,
+) -> discord.Embed:
+    embed = monk_embed(
+        f"👔 今日穿搭推薦｜{data['title']}",
+        f"**方向**：{data['direction']}\n"
+        f"**整體重點**：{data['summary']}",
+        color=0x3BA55D,
+    )
+    embed.add_field(
+        name="建議單品",
+        value="\n".join(f"・{item}" for item in data["items"]),
+        inline=False,
+    )
+    embed.add_field(
+        name="搭配重點",
+        value="\n".join(f"・{item}" for item in data["details"]),
+        inline=False,
+    )
+    embed.add_field(
+        name="赤木修士短評",
+        value=str(data["captain_note"]),
+        inline=False,
+    )
+    footer = f"今日剩餘使用次數：{remaining}"
+    if fallback_used:
+        footer += "｜本次使用備用推薦"
+    embed.set_footer(text=footer)
+    return embed
+
+
+class OutfitKeywordModal(discord.ui.Modal, title="今日穿搭推薦｜關鍵詞"):
+    keywords = discord.ui.TextInput(
+        label="今日關鍵詞",
+        placeholder="例：雨天、上課、黑色、俐落、想舒服一點",
+        required=False,
+        max_length=180,
+    )
+
+    def __init__(
+        self,
+        *,
+        user_id: int,
+        direction_key: str,
+        source_message: discord.Message | None,
+    ) -> None:
+        super().__init__()
+        self.user_id = int(user_id)
+        self.direction_key = direction_key
+        self.source_message = source_message
+
+    async def on_submit(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "這不是你的穿搭推薦流程，不能代替操作。",
+                ephemeral=True,
+            )
+            return
+
+        period_key = taipei_today().isoformat()
+        reserved = ACADEMY_DB.try_reserve_usage(
+            user_id=self.user_id,
+            usage_scope=OUTFIT_USAGE_SCOPE,
+            period_key=period_key,
+            limit=1,
+        )
+        if reserved is None:
+            await interaction.response.send_message(
+                embed=monk_embed(
+                    "👔 今日穿搭推薦",
+                    "你今天已經使用過 1 次穿搭推薦。\n"
+                    "明天再來。衣櫃不會跑走，別急。",
+                    color=0x747F8D,
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(thinking=True)
+
+        direction = choose_outfit_direction(self.direction_key)
+        keywords = sanitize_outfit_keywords(str(self.keywords.value))
+
+        fallback_used = False
+        try:
+            data, from_ai = await generate_outfit_recommendation(
+                direction=direction,
+                keywords=keywords,
+                user_id=self.user_id,
+            )
+            fallback_used = not from_ai
+        except Exception:
+            logger.exception("今日穿搭推薦 API 或 JSON 解析失敗，改用 fallback。")
+            data = outfit_fallback(
+                direction=direction,
+                keywords=keywords,
+            )
+            fallback_used = True
+
+        embed = outfit_embed(
+            data,
+            fallback_used=fallback_used,
+            remaining=0,
+        )
+        message = self.source_message
+        if message is not None:
+            try:
+                await message.edit(embed=embed, view=None)
+                await interaction.followup.send(
+                    "今日穿搭推薦已整理完畢。",
+                    ephemeral=True,
+                )
+                return
+            except (
+                discord.NotFound,
+                discord.Forbidden,
+                discord.HTTPException,
+            ):
+                pass
+
+        await interaction.followup.send(
+            embed=embed,
+        )
+
+
+class OutfitDirectionSelect(discord.ui.Select):
+    def __init__(self, owner_id: int) -> None:
+        self.owner_id = int(owner_id)
+        options = [
+            discord.SelectOption(
+                label="男裝",
+                value="male",
+                description="以男裝方向整理，但不假設穿著者性別。",
+                emoji="👔",
+            ),
+            discord.SelectOption(
+                label="女裝",
+                value="female",
+                description="以女裝方向整理，但不假設穿著者性別。",
+                emoji="🧥",
+            ),
+            discord.SelectOption(
+                label="無性別穿搭",
+                value="neutral",
+                description="中性、好活動、不強調性別分類。",
+                emoji="🎒",
+            ),
+            discord.SelectOption(
+                label="隨機",
+                value="random",
+                description="交給赤木修士抽一個方向。",
+                emoji="🎲",
+            ),
+        ]
+        super().__init__(
+            placeholder="選擇今日穿搭方向",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        await interaction.response.send_modal(
+            OutfitKeywordModal(
+                user_id=self.owner_id,
+                direction_key=self.values[0],
+                source_message=interaction.message,
+            )
+        )
+
+
+class OutfitDirectionView(discord.ui.View):
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(timeout=300)
+        self.owner_id = int(owner_id)
+        self.message: discord.Message | None = None
+        self.add_item(OutfitDirectionSelect(owner_id))
+
+    async def interaction_check(
+        self,
+        interaction: discord.Interaction,
+    ) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "這不是你的穿搭推薦流程，不能代替選擇。",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self) -> None:
+        if self.message is None:
+            return
+        try:
+            await self.message.edit(
+                embed=monk_embed(
+                    "👔 今日穿搭推薦已關閉",
+                    "超過 5 分鐘沒有選擇方向。\n"
+                    "需要重新整理穿搭時，請再輸入 `/今日穿搭推薦`。",
+                    color=0x747F8D,
+                ),
+                view=None,
+            )
+        except (
+            discord.NotFound,
+            discord.Forbidden,
+            discord.HTTPException,
+        ):
+            logger.exception("今日穿搭推薦選單逾時關閉失敗。")
+
+
 class WrongMonkChannel(app_commands.CheckFailure):
     pass
 
@@ -2381,9 +2795,10 @@ class MonkClient(discord.Client):
         )
         logger.info("修士已上線：%s（%s）", self.user, self.user.id)
         logger.info(
-            "AI 教學：永久停用｜AI 告解：%s｜AI 神諭：%s｜模型：%s｜告解每日上限：%s｜神諭每週上限：%s",
+            "AI 教學：永久停用｜AI 告解：%s｜AI 神諭：%s｜AI 穿搭：%s｜模型：%s｜告解每日上限：%s｜神諭每週上限：%s",
             "啟用" if SETTINGS.confession_ai_available else "停用",
             "啟用" if SETTINGS.oracle_ai_available else "停用",
+            "啟用" if SETTINGS.ai_available else "停用",
             SETTINGS.openai_model,
             SETTINGS.ai_daily_limit,
             SETTINGS.oracle_weekly_limit,
@@ -5190,6 +5605,45 @@ async def student_data_command(
 
 
 @tree.command(
+    name="今日穿搭推薦",
+    description="選擇方向並輸入關鍵詞，讓赤木修士整理今日穿搭",
+)
+async def outfit_command(
+    interaction: discord.Interaction,
+) -> None:
+    period_key = taipei_today().isoformat()
+    used = ACADEMY_DB.get_usage_count(
+        user_id=interaction.user.id,
+        usage_scope=OUTFIT_USAGE_SCOPE,
+        period_key=period_key,
+    )
+    if used >= 1:
+        await interaction.response.send_message(
+            embed=monk_embed(
+                "👔 今日穿搭推薦",
+                "你今天已經使用過 1 次穿搭推薦。\n"
+                "明天再來。不要把衣櫃當成無限地圖。",
+                color=0x747F8D,
+            ),
+            ephemeral=True,
+        )
+        return
+
+    view = OutfitDirectionView(interaction.user.id)
+    await interaction.response.send_message(
+        embed=monk_embed(
+            "👔 今日穿搭推薦",
+            "先選擇穿搭方向，再輸入今天想加入的關鍵詞。\n\n"
+            "方向只是風格分類，不代表穿著者性別。"
+            "赤木修士不會假設你的身材、年齡、預算或真實身分。",
+            color=0x3BA55D,
+        ),
+        view=view,
+    )
+    view.message = await interaction.original_response()
+
+
+@tree.command(
     name="修士狀態",
     description="由管理員確認修士服務是否正常",
 )
@@ -5209,8 +5663,8 @@ async def monk_status(
     )
     await interaction.response.send_message(
         "修士目前在線。\n\n"
-        "玩家操作方式：**`/學生資料`**\n"
-        "公開斜線指令數量：**2**\n"
+        "玩家操作方式：**`/學生資料`、`/今日穿搭推薦`**\n"
+        "公開斜線指令數量：**3**\n"
         "AI 教學：**永久停用**\n"
         f"AI 告解：**{confession_ai_status}**\n"
         f"AI 神諭：**{oracle_ai_status}**\n"
