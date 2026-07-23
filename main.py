@@ -899,6 +899,51 @@ class AcademyDatabase:
             place_id=place_id,
         )
 
+    def update_place_details(
+        self,
+        *,
+        user_id: int,
+        place_id: int,
+        name: str,
+        district: str,
+        description: str,
+        operator_name: str,
+        status: str,
+    ) -> dict[str, Any] | None:
+        now = utc_now_iso()
+        with closing(self.connect()) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE student_places
+                SET
+                    name = ?,
+                    district = ?,
+                    description = ?,
+                    operator_name = ?,
+                    status = ?,
+                    updated_at = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                (
+                    name.strip(),
+                    district.strip(),
+                    description.strip(),
+                    operator_name.strip(),
+                    status.strip(),
+                    now,
+                    int(place_id),
+                    str(user_id),
+                ),
+            )
+            conn.commit()
+
+        if cursor.rowcount <= 0:
+            return None
+        return self.get_user_place(
+            user_id=user_id,
+            place_id=place_id,
+        )
+
     def delete_place(
         self,
         *,
@@ -2748,6 +2793,112 @@ class PlaceModal(discord.ui.Modal, title="學院街區｜地點登記"):
         )
 
 
+class EditPlaceModal(discord.ui.Modal, title="編輯地點資料"):
+    place_name = discord.ui.TextInput(
+        label="地點名稱",
+        required=True,
+        max_length=80,
+    )
+    operator_name = discord.ui.TextInput(
+        label="店主／經營者",
+        required=True,
+        max_length=120,
+    )
+    district = discord.ui.TextInput(
+        label="所在區域",
+        required=False,
+        max_length=80,
+    )
+    status = discord.ui.TextInput(
+        label="目前狀態",
+        placeholder="營業中／使用中／等待重新開張",
+        required=True,
+        max_length=40,
+    )
+    description = discord.ui.TextInput(
+        label="地點簡介",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=700,
+    )
+
+    def __init__(
+        self,
+        *,
+        user_id: int,
+        place: dict[str, Any],
+    ) -> None:
+        super().__init__()
+        self.user_id = int(user_id)
+        self.place_id = int(place["id"])
+        self.place_type = str(place.get("place_type") or "其他")
+
+        self.place_name.default = str(place.get("name") or "")
+        self.operator_name.default = str(
+            place.get("operator_name") or ""
+        )
+        self.district.default = str(place.get("district") or "")
+        self.status.default = str(place.get("status") or "使用中")
+        self.description.default = str(
+            place.get("description") or ""
+        )
+
+        if self.place_type == "校外住處":
+            self.operator_name.label = "居住者"
+            self.operator_name.placeholder = "填寫居住角色；共同居住可填多人"
+        elif self.place_type in {
+            "商店",
+            "餐館",
+            "書店",
+            "魔藥工房",
+            "診所",
+        }:
+            self.operator_name.label = "店主／經營者"
+            self.operator_name.placeholder = "填寫店主角色；共同經營可填多人"
+        else:
+            self.operator_name.label = "負責人／使用者"
+            self.operator_name.placeholder = "填寫負責角色；可填多人"
+
+    async def on_submit(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        session = current_player_panel(self.user_id)
+        if session is None:
+            await interaction.response.send_message(
+                "這張學生資料的操作入口已關閉。"
+                "請重新輸入 `/學生資料`。",
+                ephemeral=True,
+            )
+            return
+
+        updated = ACADEMY_DB.update_place_details(
+            user_id=self.user_id,
+            place_id=self.place_id,
+            name=str(self.place_name.value),
+            operator_name=str(self.operator_name.value),
+            district=str(self.district.value),
+            status=str(self.status.value),
+            description=str(self.description.value),
+        )
+        if updated is None:
+            await interaction.response.send_message(
+                "找不到這個地點，可能已經被刪除。",
+                ephemeral=True,
+            )
+            return
+
+        await edit_player_panel_from_modal(
+            interaction,
+            owner_id=self.user_id,
+            embed=place_detail_embed(updated),
+            view=PlaceDetailManageView(
+                self.user_id,
+                updated,
+            ),
+        )
+
+
 def place_embed(
     place: dict[str, Any],
     *,
@@ -3680,7 +3831,7 @@ def place_detail_embed(place: dict[str, Any]) -> discord.Embed:
         f"{place.get('description') or '沒有簡介。'}",
         color=0x8B6F47,
     )
-    embed.set_footer(text="此管理頁公開可見；只有本人能切換公開或刪除。")
+    embed.set_footer(text="此管理頁公開可見；只有本人能編輯、切換公開或刪除。")
     return embed
 
 
@@ -3762,6 +3913,38 @@ class PlaceDetailManageView(UserOwnedView):
             discord.ButtonStyle.success
             if is_public
             else discord.ButtonStyle.secondary
+        )
+
+    @discord.ui.button(
+        label="編輯地點",
+        style=discord.ButtonStyle.primary,
+        emoji="✏️",
+        row=1,
+    )
+    async def edit_place(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        current = ACADEMY_DB.get_user_place(
+            user_id=self.owner_id,
+            place_id=int(self.place["id"]),
+        )
+        if current is None:
+            await interaction.response.edit_message(
+                embed=student_places_embed(self.owner_id),
+                view=MyPlacesHubView(
+                    self.owner_id,
+                    return_target="student",
+                ),
+            )
+            return
+
+        await interaction.response.send_modal(
+            EditPlaceModal(
+                user_id=self.owner_id,
+                place=current,
+            )
         )
 
     @discord.ui.button(
