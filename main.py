@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# stern-monk-zh-tw v27 single-file deploy
+# stern-monk-zh-tw v27.1 single-file deploy
 # 主要程式碼集中於本檔；data/ 僅保存教學與台詞資料。
 
 
@@ -3014,19 +3014,158 @@ async def fetch_shop_thread(
     return channel if isinstance(channel, discord.Thread) else None
 
 
+def _normalise_component_media_url(
+    raw_url: Any,
+    message: discord.Message,
+) -> str | None:
+    url = str(raw_url or "").strip()
+    if not url:
+        return None
+
+    if url.startswith("attachment://"):
+        filename = url.removeprefix("attachment://")
+        for attachment in message.attachments:
+            if attachment.filename == filename:
+                return str(attachment.url)
+        return None
+
+    if url.startswith(("https://", "http://")):
+        return url
+    return None
+
+
+def _component_image_url(
+    component: Any,
+    message: discord.Message,
+    *,
+    seen: set[int] | None = None,
+) -> str | None:
+    if component is None:
+        return None
+
+    if seen is None:
+        seen = set()
+    object_id = id(component)
+    if object_id in seen:
+        return None
+    seen.add(object_id)
+
+    # Components V2 的 Thumbnail、MediaGalleryItem、File 等物件，
+    # 圖片位置可能在 media.url 或 file.url，而不是 message.attachments。
+    for attribute_name in ("media", "file"):
+        media = getattr(component, attribute_name, None)
+        if media is not None:
+            url = _normalise_component_media_url(
+                getattr(media, "url", None),
+                message,
+            )
+            content_type = str(
+                getattr(media, "content_type", "") or ""
+            ).lower()
+            width = getattr(media, "width", None)
+            height = getattr(media, "height", None)
+            if url and (
+                content_type.startswith("image/")
+                or width is not None
+                or height is not None
+                or Path(url.split("?", 1)[0]).suffix.lower() in IMAGE_SUFFIXES
+            ):
+                return url
+
+    direct_url = _normalise_component_media_url(
+        getattr(component, "url", None),
+        message,
+    )
+    if direct_url and (
+        Path(direct_url.split("?", 1)[0]).suffix.lower() in IMAGE_SUFFIXES
+    ):
+        return direct_url
+
+    for attribute_name in ("items", "children", "components"):
+        children = getattr(component, attribute_name, None)
+        if children:
+            for child in children:
+                url = _component_image_url(child, message, seen=seen)
+                if url:
+                    return url
+
+    accessory = getattr(component, "accessory", None)
+    if accessory is not None:
+        return _component_image_url(accessory, message, seen=seen)
+    return None
+
+
 def message_image_url(message: discord.Message) -> str | None:
     for attachment in message.attachments:
         content_type = str(attachment.content_type or "").lower()
         suffix = Path(attachment.filename).suffix.lower()
-        if content_type.startswith("image/") or suffix in IMAGE_SUFFIXES:
-            return attachment.url
+        # Discord 有時不提供 content_type，或將圖片標成一般檔案；
+        # 圖片附件仍會帶有 width / height。
+        if (
+            content_type.startswith("image/")
+            or suffix in IMAGE_SUFFIXES
+            or attachment.width is not None
+            or attachment.height is not None
+        ):
+            return str(attachment.url or attachment.proxy_url)
 
     for item in message.embeds:
         if item.image and item.image.url:
             return item.image.url
         if item.thumbnail and item.thumbnail.url:
             return item.thumbnail.url
+
+    # 新版 Discord 可能把圖片放進 Components V2 的 Media Gallery。
+    for component in getattr(message, "components", []) or []:
+        image_url = _component_image_url(component, message)
+        if image_url:
+            return image_url
     return None
+
+
+async def find_shop_cover_message(
+    thread: discord.Thread,
+    preferred_message_id: int,
+) -> tuple[discord.Message | None, str | None]:
+    checked_ids: set[int] = set()
+
+    async def check_message(message_id: int) -> tuple[discord.Message | None, str | None]:
+        if message_id in checked_ids:
+            return None, None
+        checked_ids.add(message_id)
+        try:
+            message = await thread.fetch_message(message_id)
+        except (
+            discord.NotFound,
+            discord.Forbidden,
+            discord.HTTPException,
+        ):
+            return None, None
+        return message, message_image_url(message)
+
+    # 先看玩家指定的訊息，再看論壇首則訊息。
+    for message_id in (preferred_message_id, thread.id):
+        message, image_url = await check_message(message_id)
+        if image_url:
+            return message, image_url
+
+    # 有些論壇貼文的圖片被 Discord 拆到其他訊息或媒體元件；
+    # 最後掃描近期訊息，找到第一張可用圖片作為封面。
+    try:
+        async for message in thread.history(
+            limit=50,
+            oldest_first=True,
+        ):
+            if message.id in checked_ids:
+                continue
+            checked_ids.add(message.id)
+            image_url = message_image_url(message)
+            if image_url:
+                return message, image_url
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+    return None, None
 
 
 async def resolve_shop_cover_url(
@@ -3044,23 +3183,8 @@ async def resolve_shop_cover_url(
     if thread is None:
         return None
 
-    message_ids = [message_id]
-    if message_id != thread_id:
-        message_ids.append(thread_id)
-
-    for target_id in message_ids:
-        try:
-            message = await thread.fetch_message(target_id)
-        except (
-            discord.NotFound,
-            discord.Forbidden,
-            discord.HTTPException,
-        ):
-            continue
-        image_url = message_image_url(message)
-        if image_url:
-            return image_url
-    return None
+    _, image_url = await find_shop_cover_message(thread, message_id)
+    return image_url
 
 
 class ReturnToPlayerHomeButton(discord.ui.Button):
@@ -4607,7 +4731,7 @@ class ShopLinkModal(discord.ui.Modal, title="綁定店鋪論壇貼文"):
             return
 
         try:
-            cover_message = await thread.fetch_message(message_id)
+            linked_message = await thread.fetch_message(message_id)
         except discord.NotFound:
             await interaction.followup.send(
                 "找不到你貼上的那則訊息。請在店鋪貼文內對目標訊息複製連結。",
@@ -4621,12 +4745,20 @@ class ShopLinkModal(discord.ui.Modal, title="綁定店鋪論壇貼文"):
             )
             return
 
+        cover_message, cover_image_url = await find_shop_cover_message(
+            thread,
+            linked_message.id,
+        )
+        stored_cover_message_id = (
+            cover_message.id if cover_message is not None else linked_message.id
+        )
+
         updated = ACADEMY_DB.update_place_shop_link(
             user_id=self.owner_id,
             place_id=self.place_id,
             guild_id=guild_id,
             thread_id=thread_id,
-            cover_message_id=message_id,
+            cover_message_id=stored_cover_message_id,
         )
         if updated is None:
             await interaction.followup.send(
@@ -4643,8 +4775,11 @@ class ShopLinkModal(discord.ui.Modal, title="綁定店鋪論壇貼文"):
 
         image_note = (
             "並已讀取店鋪封面圖片。"
-            if message_image_url(cover_message)
-            else "連結已綁定；這則訊息目前沒有圖片，因此管理卡片暫時不顯示封面。"
+            if cover_image_url
+            else (
+                "連結已綁定，但修士仍未在貼文最近 50 則訊息中找到可讀取的圖片。"
+                "請確認圖片是直接上傳到 Discord，而不是只有外部網頁預覽。"
+            )
         )
         await interaction.followup.send(
             f"店鋪貼文已綁定，{image_note}",
