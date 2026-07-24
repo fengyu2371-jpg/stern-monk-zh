@@ -3037,12 +3037,22 @@ def list_public_shop_places(district: str | None = None) -> list[dict[str, Any]]
     return places
 
 
-def town_hub_embed() -> discord.Embed:
-    return monk_embed(
+def town_hub_render() -> tuple[discord.Embed, discord.File | None]:
+    info = DISTRICT_GUIDE[DISTRICT_OVERVIEW_KEY]
+    embed = monk_embed(
         "🏘️ 禊月堂魔法學院城下町",
         "依區域尋找公開店鋪、查看校外住處，或管理自己的店鋪與住所。",
         color=0x8B6F47,
     )
+
+    filename = info["filename"]
+    asset_path = DISTRICT_ASSET_ROOT / filename
+    if not asset_path.is_file():
+        logger.warning("找不到城下町總覽圖片：%s", asset_path)
+        return embed, None
+
+    embed.set_image(url=f"attachment://{filename}")
+    return embed, discord.File(asset_path, filename=filename)
 
 
 def district_guide_embed(
@@ -3926,9 +3936,11 @@ class PlacesView(UserOwnedView):
             )
             return
 
+        embed, file = town_hub_render()
+        attachments = [file] if file is not None else []
         await interaction.response.edit_message(
-            embed=town_hub_embed(),
-            attachments=[],
+            embed=embed,
+            attachments=attachments,
             view=TownHubView(self.owner_id),
         )
 
@@ -5634,12 +5646,11 @@ class PlaceVisibilityPickerView(UserOwnedView):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
+        embed, file = town_hub_render()
+        attachments = [file] if file is not None else []
         await interaction.response.edit_message(
-            embed=monk_embed(
-                "🏘️ 禊月堂城下町",
-                "查看公開店鋪與校外住處，或管理自己的地點。",
-                color=0x8B6F47,
-            ),
+            embed=embed,
+            attachments=attachments,
             view=TownHubView(self.owner_id),
         )
 
@@ -5748,9 +5759,11 @@ class MyPlacesHubView(UserOwnedView):
             )
             return
 
+        embed, file = town_hub_render()
+        attachments = [file] if file is not None else []
         await interaction.response.edit_message(
-            embed=town_hub_embed(),
-            attachments=[],
+            embed=embed,
+            attachments=attachments,
             view=TownHubView(self.owner_id),
         )
 
@@ -5875,9 +5888,11 @@ class DistrictBrowserView(UserOwnedView):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
+        embed, file = town_hub_render()
+        attachments = [file] if file is not None else []
         await interaction.response.edit_message(
-            embed=town_hub_embed(),
-            attachments=[],
+            embed=embed,
+            attachments=attachments,
             view=TownHubView(self.owner_id),
         )
 
@@ -6540,13 +6555,11 @@ class PlayerPanelHomeView(UserOwnedView):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
+        embed, file = town_hub_render()
+        attachments = [file] if file is not None else []
         await interaction.response.edit_message(
-            embed=monk_embed(
-                "🏘️ 禊月堂魔法學院城下町",
-                "商店街與校外居住地會顯示全體學生公開登記的資料。"
-                "你也可以管理自己的地點。",
-                color=0x8B6F47,
-            ),
+            embed=embed,
+            attachments=attachments,
             view=TownHubView(self.owner_id),
         )
 
