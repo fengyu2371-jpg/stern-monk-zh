@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# stern-monk-zh-tw v23 single-file deploy
+# stern-monk-zh-tw v27 single-file deploy
 # 主要程式碼集中於本檔；data/ 僅保存教學與台詞資料。
 
 
@@ -349,6 +349,9 @@ class AcademyDatabase:
                     status TEXT NOT NULL DEFAULT '使用中',
                     allow_oracle INTEGER NOT NULL DEFAULT 1,
                     is_public INTEGER NOT NULL DEFAULT 1,
+                    shop_guild_id TEXT NOT NULL DEFAULT '',
+                    shop_thread_id TEXT NOT NULL DEFAULT '',
+                    shop_cover_message_id TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (user_id)
@@ -422,6 +425,21 @@ class AcademyDatabase:
                 conn.execute(
                     "ALTER TABLE student_places "
                     "ADD COLUMN operator_name TEXT NOT NULL DEFAULT ''"
+                )
+            if "shop_guild_id" not in place_columns:
+                conn.execute(
+                    "ALTER TABLE student_places "
+                    "ADD COLUMN shop_guild_id TEXT NOT NULL DEFAULT ''"
+                )
+            if "shop_thread_id" not in place_columns:
+                conn.execute(
+                    "ALTER TABLE student_places "
+                    "ADD COLUMN shop_thread_id TEXT NOT NULL DEFAULT ''"
+                )
+            if "shop_cover_message_id" not in place_columns:
+                conn.execute(
+                    "ALTER TABLE student_places "
+                    "ADD COLUMN shop_cover_message_id TEXT NOT NULL DEFAULT ''"
                 )
 
             # 舊地點以原登記學生的希望稱呼作為經營者／居住者。
@@ -934,6 +952,74 @@ class AcademyDatabase:
                     int(place_id),
                     str(user_id),
                 ),
+            )
+            conn.commit()
+
+        if cursor.rowcount <= 0:
+            return None
+        return self.get_user_place(
+            user_id=user_id,
+            place_id=place_id,
+        )
+
+    def update_place_shop_link(
+        self,
+        *,
+        user_id: int,
+        place_id: int,
+        guild_id: int,
+        thread_id: int,
+        cover_message_id: int,
+    ) -> dict[str, Any] | None:
+        now = utc_now_iso()
+        with closing(self.connect()) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE student_places
+                SET
+                    shop_guild_id = ?,
+                    shop_thread_id = ?,
+                    shop_cover_message_id = ?,
+                    updated_at = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                (
+                    str(guild_id),
+                    str(thread_id),
+                    str(cover_message_id),
+                    now,
+                    int(place_id),
+                    str(user_id),
+                ),
+            )
+            conn.commit()
+
+        if cursor.rowcount <= 0:
+            return None
+        return self.get_user_place(
+            user_id=user_id,
+            place_id=place_id,
+        )
+
+    def clear_place_shop_link(
+        self,
+        *,
+        user_id: int,
+        place_id: int,
+    ) -> dict[str, Any] | None:
+        now = utc_now_iso()
+        with closing(self.connect()) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE student_places
+                SET
+                    shop_guild_id = '',
+                    shop_thread_id = '',
+                    shop_cover_message_id = '',
+                    updated_at = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                (now, int(place_id), str(user_id)),
             )
             conn.commit()
 
@@ -1955,6 +2041,9 @@ import asyncio
 import json
 import logging
 import random
+import re
+import tempfile
+import zipfile
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -2878,6 +2967,101 @@ PLACE_DISTRICT_CHOICES = [
     ("🏰 學院大道", "學院大道"),
 ]
 
+SHOP_LINK_PATTERN = re.compile(
+    r"https?://(?:(?:canary|ptb)\.)?discord(?:app)?\.com/"
+    r"channels/(?P<guild_id>\d+)/(?P<thread_id>\d+)"
+    r"(?:/(?P<message_id>\d+))?/?(?:\?.*)?$",
+    re.IGNORECASE,
+)
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+
+
+def parse_shop_link(value: str) -> tuple[int, int, int]:
+    match = SHOP_LINK_PATTERN.fullmatch(value.strip())
+    if match is None:
+        raise ValueError("請貼上完整的 Discord 論壇貼文或訊息連結。")
+
+    guild_id = int(match.group("guild_id"))
+    thread_id = int(match.group("thread_id"))
+    message_id_text = match.group("message_id")
+    # Discord 論壇貼文的首則訊息與討論串使用相同 ID。
+    message_id = int(message_id_text) if message_id_text else thread_id
+    return guild_id, thread_id, message_id
+
+
+def shop_post_url(place: dict[str, Any]) -> str | None:
+    guild_id = str(place.get("shop_guild_id") or "").strip()
+    thread_id = str(place.get("shop_thread_id") or "").strip()
+    if not guild_id.isdigit() or not thread_id.isdigit():
+        return None
+    return f"https://discord.com/channels/{guild_id}/{thread_id}"
+
+
+async def fetch_shop_thread(
+    bot: discord.Client,
+    thread_id: int,
+) -> discord.Thread | None:
+    channel = bot.get_channel(thread_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(thread_id)
+        except (
+            discord.NotFound,
+            discord.Forbidden,
+            discord.HTTPException,
+        ):
+            return None
+    return channel if isinstance(channel, discord.Thread) else None
+
+
+def message_image_url(message: discord.Message) -> str | None:
+    for attachment in message.attachments:
+        content_type = str(attachment.content_type or "").lower()
+        suffix = Path(attachment.filename).suffix.lower()
+        if content_type.startswith("image/") or suffix in IMAGE_SUFFIXES:
+            return attachment.url
+
+    for item in message.embeds:
+        if item.image and item.image.url:
+            return item.image.url
+        if item.thumbnail and item.thumbnail.url:
+            return item.thumbnail.url
+    return None
+
+
+async def resolve_shop_cover_url(
+    place: dict[str, Any],
+    bot: discord.Client,
+) -> str | None:
+    thread_text = str(place.get("shop_thread_id") or "").strip()
+    message_text = str(place.get("shop_cover_message_id") or "").strip()
+    if not thread_text.isdigit():
+        return None
+
+    thread_id = int(thread_text)
+    message_id = int(message_text) if message_text.isdigit() else thread_id
+    thread = await fetch_shop_thread(bot, thread_id)
+    if thread is None:
+        return None
+
+    message_ids = [message_id]
+    if message_id != thread_id:
+        message_ids.append(thread_id)
+
+    for target_id in message_ids:
+        try:
+            message = await thread.fetch_message(target_id)
+        except (
+            discord.NotFound,
+            discord.Forbidden,
+            discord.HTTPException,
+        ):
+            continue
+        image_url = message_image_url(message)
+        if image_url:
+            return image_url
+    return None
+
 
 class ReturnToPlayerHomeButton(discord.ui.Button):
     def __init__(self) -> None:
@@ -3320,10 +3504,10 @@ class EditPlaceModal(discord.ui.Modal, title="編輯地點資料"):
             )
             return
 
-        await edit_player_panel_from_modal(
-            interaction,
-            owner_id=self.user_id,
-            embed=place_detail_embed(updated),
+        session.touch()
+        await interaction.response.defer()
+        await session.message.edit(
+            embed=await build_place_detail_embed(updated, interaction.client),
             view=PlaceDetailManageView(
                 self.user_id,
                 updated,
@@ -3336,6 +3520,7 @@ def place_embed(
     *,
     index: int,
     total: int,
+    image_url: str | None = None,
 ) -> discord.Embed:
     embed = monk_embed(
         f"🏘️ 學院街區｜{place['name']}",
@@ -3348,8 +3533,26 @@ def place_embed(
         f"{place.get('description') or '沒有簡介。'}",
         color=0x8B6F47,
     )
+    if image_url:
+        embed.set_image(url=image_url)
     embed.set_footer(text=f"地點 {index + 1}／{total}")
     return embed
+
+
+async def build_place_embed(
+    place: dict[str, Any],
+    *,
+    index: int,
+    total: int,
+    bot: discord.Client,
+) -> discord.Embed:
+    image_url = await resolve_shop_cover_url(place, bot)
+    return place_embed(
+        place,
+        index=index,
+        total=total,
+        image_url=image_url,
+    )
 
 
 class PlacesView(UserOwnedView):
@@ -3361,17 +3564,34 @@ class PlacesView(UserOwnedView):
         super().__init__(owner_id)
         self.places = places
         self.index = 0
+        self.shop_link_button: discord.ui.Button | None = None
         self._refresh_buttons()
 
     def _refresh_buttons(self) -> None:
         self.previous_page.disabled = self.index <= 0
         self.next_page.disabled = self.index >= len(self.places) - 1
 
-    def current_embed(self) -> discord.Embed:
-        return place_embed(
+        if self.shop_link_button is not None:
+            self.remove_item(self.shop_link_button)
+            self.shop_link_button = None
+
+        url = shop_post_url(self.places[self.index])
+        if url:
+            self.shop_link_button = discord.ui.Button(
+                label="前往店鋪",
+                emoji="🏪",
+                style=discord.ButtonStyle.link,
+                url=url,
+                row=1,
+            )
+            self.add_item(self.shop_link_button)
+
+    async def current_embed(self, bot: discord.Client) -> discord.Embed:
+        return await build_place_embed(
             self.places[self.index],
             index=self.index,
             total=len(self.places),
+            bot=bot,
         )
 
     @discord.ui.button(
@@ -3386,8 +3606,9 @@ class PlacesView(UserOwnedView):
     ) -> None:
         self.index = max(0, self.index - 1)
         self._refresh_buttons()
-        await interaction.response.edit_message(
-            embed=self.current_embed(),
+        await interaction.response.defer()
+        await interaction.edit_original_response(
+            embed=await self.current_embed(interaction.client),
             view=self,
         )
 
@@ -3403,8 +3624,9 @@ class PlacesView(UserOwnedView):
     ) -> None:
         self.index = min(len(self.places) - 1, self.index + 1)
         self._refresh_buttons()
-        await interaction.response.edit_message(
-            embed=self.current_embed(),
+        await interaction.response.defer()
+        await interaction.edit_original_response(
+            embed=await self.current_embed(interaction.client),
             view=self,
         )
 
@@ -4274,8 +4496,13 @@ def place_visibility_embed(place: dict[str, Any]) -> discord.Embed:
     )
 
 
-def place_detail_embed(place: dict[str, Any]) -> discord.Embed:
+def place_detail_embed(
+    place: dict[str, Any],
+    *,
+    image_url: str | None = None,
+) -> discord.Embed:
     visibility = "公開" if place.get("is_public") else "不公開"
+    shop_status = "已綁定" if shop_post_url(place) else "尚未綁定"
     embed = monk_embed(
         f"📍 地點管理｜{place.get('name') or '未命名地點'}",
         f"**地點編號**：#{place.get('id')}\n"
@@ -4284,14 +4511,145 @@ def place_detail_embed(place: dict[str, Any]) -> discord.Embed:
         f"**區域**：{place.get('district') or '未設定'}\n"
         f"**狀態**：{place.get('status') or '未設定'}\n"
         f"**公開狀態**：{visibility}\n"
+        f"**店鋪貼文**：{shop_status}\n"
         f"**可作神諭素材**：是\n"
         f"**來源**：{place.get('source_kind') or '新登記'}\n\n"
         f"**地點簡介**\n"
         f"{place.get('description') or '沒有簡介。'}",
         color=0x8B6F47,
     )
-    embed.set_footer(text="此管理頁公開可見；只有本人能編輯、切換公開或刪除。")
+    if image_url:
+        embed.set_image(url=image_url)
+    embed.set_footer(
+        text="此管理頁公開可見；只有本人能編輯、綁定貼文、切換公開或刪除。"
+    )
     return embed
+
+
+async def build_place_detail_embed(
+    place: dict[str, Any],
+    bot: discord.Client,
+) -> discord.Embed:
+    image_url = await resolve_shop_cover_url(place, bot)
+    return place_detail_embed(place, image_url=image_url)
+
+
+class ShopLinkModal(discord.ui.Modal, title="綁定店鋪論壇貼文"):
+    shop_link = discord.ui.TextInput(
+        label="Discord 論壇貼文／訊息連結",
+        placeholder="在店鋪貼文按右鍵 → 複製訊息連結",
+        required=True,
+        max_length=300,
+    )
+
+    def __init__(
+        self,
+        owner_id: int,
+        place: dict[str, Any],
+    ) -> None:
+        super().__init__()
+        self.owner_id = int(owner_id)
+        self.place_id = int(place["id"])
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        session = current_player_panel(self.owner_id)
+        if session is None:
+            await interaction.response.send_message(
+                "這張學生資料的操作入口已關閉。請重新輸入 `/學生資料`。",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            guild_id, thread_id, message_id = parse_shop_link(
+                str(self.shop_link.value)
+            )
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+
+        if interaction.guild_id is None or guild_id != interaction.guild_id:
+            await interaction.response.send_message(
+                "這個連結不是目前伺服器中的貼文。",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        thread = await fetch_shop_thread(interaction.client, thread_id)
+        if thread is None:
+            await interaction.followup.send(
+                "找不到這篇貼文，或修士沒有查看該貼文的權限。",
+                ephemeral=True,
+            )
+            return
+
+        if not isinstance(thread.parent, discord.ForumChannel):
+            await interaction.followup.send(
+                "這不是論壇頻道中的店鋪貼文。",
+                ephemeral=True,
+            )
+            return
+
+        if thread.guild.id != guild_id:
+            await interaction.followup.send(
+                "貼文所屬伺服器不一致。",
+                ephemeral=True,
+            )
+            return
+
+        if thread.owner_id != self.owner_id:
+            await interaction.followup.send(
+                "只能綁定由你本人建立的論壇貼文。",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            cover_message = await thread.fetch_message(message_id)
+        except discord.NotFound:
+            await interaction.followup.send(
+                "找不到你貼上的那則訊息。請在店鋪貼文內對目標訊息複製連結。",
+                ephemeral=True,
+            )
+            return
+        except (discord.Forbidden, discord.HTTPException):
+            await interaction.followup.send(
+                "修士目前無法讀取這則訊息，請檢查論壇頻道權限。",
+                ephemeral=True,
+            )
+            return
+
+        updated = ACADEMY_DB.update_place_shop_link(
+            user_id=self.owner_id,
+            place_id=self.place_id,
+            guild_id=guild_id,
+            thread_id=thread_id,
+            cover_message_id=message_id,
+        )
+        if updated is None:
+            await interaction.followup.send(
+                "找不到這個地點，可能已經被刪除。",
+                ephemeral=True,
+            )
+            return
+
+        session.touch()
+        await session.message.edit(
+            embed=await build_place_detail_embed(updated, interaction.client),
+            view=PlaceDetailManageView(self.owner_id, updated),
+        )
+
+        image_note = (
+            "並已讀取店鋪封面圖片。"
+            if message_image_url(cover_message)
+            else "連結已綁定；這則訊息目前沒有圖片，因此管理卡片暫時不顯示封面。"
+        )
+        await interaction.followup.send(
+            f"店鋪貼文已綁定，{image_note}",
+            ephemeral=True,
+        )
 
 
 class PlaceManageSelect(discord.ui.Select):
@@ -4344,8 +4702,9 @@ class PlaceManageSelect(discord.ui.Select):
             )
             return
 
-        await interaction.response.edit_message(
-            embed=place_detail_embed(place),
+        await interaction.response.defer()
+        await interaction.edit_original_response(
+            embed=await build_place_detail_embed(place, interaction.client),
             view=PlaceDetailManageView(
                 self.owner_id,
                 place,
@@ -4409,8 +4768,9 @@ class PlaceDistrictSelect(discord.ui.Select):
             )
             return
 
-        await interaction.response.edit_message(
-            embed=place_detail_embed(updated),
+        await interaction.response.defer()
+        await interaction.edit_original_response(
+            embed=await build_place_detail_embed(updated, interaction.client),
             view=PlaceDetailManageView(
                 self.owner_id,
                 updated,
@@ -4453,8 +4813,9 @@ class PlaceDistrictChangeView(UserOwnedView):
             )
             return
 
-        await interaction.response.edit_message(
-            embed=place_detail_embed(place),
+        await interaction.response.defer()
+        await interaction.edit_original_response(
+            embed=await build_place_detail_embed(place, interaction.client),
             view=PlaceDetailManageView(
                 self.owner_id,
                 place,
@@ -4470,6 +4831,7 @@ class PlaceDetailManageView(UserOwnedView):
     ) -> None:
         super().__init__(owner_id)
         self.place = place
+        self.shop_link_button: discord.ui.Button | None = None
         self._refresh_buttons()
 
     def _refresh_buttons(self) -> None:
@@ -4482,6 +4844,24 @@ class PlaceDetailManageView(UserOwnedView):
             if is_public
             else discord.ButtonStyle.secondary
         )
+
+        has_shop_link = shop_post_url(self.place) is not None
+        self.unlink_shop.disabled = not has_shop_link
+
+        if self.shop_link_button is not None:
+            self.remove_item(self.shop_link_button)
+            self.shop_link_button = None
+
+        url = shop_post_url(self.place)
+        if url:
+            self.shop_link_button = discord.ui.Button(
+                label="前往店鋪",
+                emoji="🏪",
+                style=discord.ButtonStyle.link,
+                url=url,
+                row=3,
+            )
+            self.add_item(self.shop_link_button)
 
     @discord.ui.button(
         label="編輯地點",
@@ -4513,6 +4893,64 @@ class PlaceDetailManageView(UserOwnedView):
                 user_id=self.owner_id,
                 place=current,
             )
+        )
+
+    @discord.ui.button(
+        label="公開顯示：是",
+        style=discord.ButtonStyle.success,
+        emoji="👁️",
+        row=1,
+    )
+    async def toggle_visibility(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        updated = ACADEMY_DB.update_place_visibility(
+            user_id=self.owner_id,
+            place_id=int(self.place["id"]),
+            is_public=not bool(self.place.get("is_public")),
+        )
+        if updated is None:
+            await interaction.response.edit_message(
+                embed=student_places_embed(self.owner_id),
+                view=MyPlacesHubView(
+                    self.owner_id,
+                    return_target="student",
+                ),
+            )
+            return
+
+        self.place = updated
+        self._refresh_buttons()
+        await interaction.response.defer()
+        await interaction.edit_original_response(
+            embed=await build_place_detail_embed(self.place, interaction.client),
+            view=self,
+        )
+
+    @discord.ui.button(
+        label="刪除此地點",
+        style=discord.ButtonStyle.danger,
+        emoji="🗑️",
+        row=1,
+    )
+    async def delete_place(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=monk_embed(
+                "⚠️ 確認刪除地點",
+                f"即將刪除 **{self.place.get('name') or '未命名地點'}**。\n\n"
+                "刪除後不會出現在你的地點清單，也不會再成為神諭素材。",
+                color=0xED4245,
+            ),
+            view=PlaceDeleteConfirmView(
+                self.owner_id,
+                int(self.place["id"]),
+            ),
         )
 
     @discord.ui.button(
@@ -4554,63 +4992,6 @@ class PlaceDetailManageView(UserOwnedView):
         )
 
     @discord.ui.button(
-        label="公開顯示：是",
-        style=discord.ButtonStyle.success,
-        emoji="👁️",
-        row=1,
-    )
-    async def toggle_visibility(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        updated = ACADEMY_DB.update_place_visibility(
-            user_id=self.owner_id,
-            place_id=int(self.place["id"]),
-            is_public=not bool(self.place.get("is_public")),
-        )
-        if updated is None:
-            await interaction.response.edit_message(
-                embed=student_places_embed(self.owner_id),
-                view=MyPlacesHubView(
-                    self.owner_id,
-                    return_target="student",
-                ),
-            )
-            return
-
-        self.place = updated
-        self._refresh_buttons()
-        await interaction.response.edit_message(
-            embed=place_detail_embed(self.place),
-            view=self,
-        )
-
-    @discord.ui.button(
-        label="刪除此地點",
-        style=discord.ButtonStyle.danger,
-        emoji="🗑️",
-        row=1,
-    )
-    async def delete_place(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await interaction.response.edit_message(
-            embed=monk_embed(
-                "⚠️ 確認刪除地點",
-                f"即將刪除 **{self.place.get('name') or '未命名地點'}**。\n\n"
-                "刪除後不會出現在你的地點清單，也不會再成為神諭素材。",
-                color=0xED4245,
-            ),
-            view=PlaceDeleteConfirmView(
-                self.owner_id,
-                int(self.place["id"]),
-            ),
-        )
-
-    @discord.ui.button(
         label="返回地點總覽",
         style=discord.ButtonStyle.secondary,
         emoji="↩️",
@@ -4627,6 +5008,60 @@ class PlaceDetailManageView(UserOwnedView):
                 self.owner_id,
                 return_target="student",
             ),
+        )
+
+    @discord.ui.button(
+        label="綁定／更新店鋪貼文",
+        style=discord.ButtonStyle.success,
+        emoji="🔗",
+        row=3,
+    )
+    async def bind_shop(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        current = ACADEMY_DB.get_user_place(
+            user_id=self.owner_id,
+            place_id=int(self.place["id"]),
+        )
+        if current is None:
+            await interaction.response.send_message(
+                "找不到這個地點，可能已經被刪除。",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(
+            ShopLinkModal(self.owner_id, current)
+        )
+
+    @discord.ui.button(
+        label="解除店鋪連結",
+        style=discord.ButtonStyle.secondary,
+        emoji="⛓️‍💥",
+        row=3,
+    )
+    async def unlink_shop(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        updated = ACADEMY_DB.clear_place_shop_link(
+            user_id=self.owner_id,
+            place_id=int(self.place["id"]),
+        )
+        if updated is None:
+            await interaction.response.send_message(
+                "找不到這個地點，可能已經被刪除。",
+                ephemeral=True,
+            )
+            return
+
+        self.place = updated
+        self._refresh_buttons()
+        await interaction.response.edit_message(
+            embed=place_detail_embed(updated),
+            view=self,
         )
 
 
@@ -4700,8 +5135,9 @@ class PlaceDeleteConfirmView(UserOwnedView):
             )
             return
 
-        await interaction.response.edit_message(
-            embed=place_detail_embed(place),
+        await interaction.response.defer()
+        await interaction.edit_original_response(
+            embed=await build_place_detail_embed(place, interaction.client),
             view=PlaceDetailManageView(
                 self.owner_id,
                 place,
@@ -5009,8 +5445,9 @@ class TownHubView(UserOwnedView):
             return
 
         view = PlacesView(self.owner_id, places)
-        await interaction.response.edit_message(
-            embed=view.current_embed(),
+        await interaction.response.defer()
+        await interaction.edit_original_response(
+            embed=await view.current_embed(interaction.client),
             view=view,
         )
 
@@ -5820,6 +6257,82 @@ async def outfit_command(
 
 
 @tree.command(
+    name="下載目前備份",
+    description="由管理員下載目前的修士資料庫安全快照",
+)
+@app_commands.default_permissions(manage_guild=True)
+async def download_current_backup(
+    interaction: discord.Interaction,
+) -> None:
+    member = interaction.user
+    if (
+        not isinstance(member, discord.Member)
+        or not member.guild_permissions.manage_guild
+    ):
+        await interaction.response.send_message(
+            "這個指令只提供給擁有「管理伺服器」權限的管理員。",
+            ephemeral=True,
+        )
+        return
+
+    database_path = Path(SETTINGS.monk_db_path)
+    if not database_path.exists():
+        await interaction.response.send_message(
+            f"找不到目前資料庫：`{database_path}`",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    stamp = datetime.now(TAIPEI_TIMEZONE).strftime("%Y%m%d_%H%M%S")
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="monk-backup-") as temp_dir:
+            temp_path = Path(temp_dir)
+            backup_name = f"monk_backup_{stamp}.db"
+            backup_path = temp_path / backup_name
+            zip_path = temp_path / f"monk_backup_{stamp}.zip"
+
+            with closing(sqlite3.connect(str(database_path))) as source_conn:
+                with closing(sqlite3.connect(str(backup_path))) as backup_conn:
+                    source_conn.backup(backup_conn)
+
+            with zipfile.ZipFile(
+                zip_path,
+                mode="w",
+                compression=zipfile.ZIP_DEFLATED,
+            ) as archive:
+                archive.write(backup_path, arcname=backup_name)
+
+            zip_size = zip_path.stat().st_size
+            await interaction.followup.send(
+                content=(
+                    "目前資料庫的安全快照已建立。\n"
+                    f"備份時間：**{datetime.now(TAIPEI_TIMEZONE):%Y-%m-%d %H:%M:%S}**\n"
+                    f"壓縮檔大小：**{zip_size / 1024:.1f} KB**"
+                ),
+                file=discord.File(
+                    zip_path,
+                    filename=zip_path.name,
+                ),
+                ephemeral=True,
+            )
+    except discord.HTTPException:
+        logger.exception("傳送修士資料庫備份失敗")
+        await interaction.followup.send(
+            "備份已建立，但 Discord 無法傳送檔案。檔案可能超過目前伺服器的上傳限制，"
+            "請查看 Railway 紀錄。",
+            ephemeral=True,
+        )
+    except (OSError, sqlite3.Error, zipfile.BadZipFile):
+        logger.exception("建立修士資料庫備份失敗")
+        await interaction.followup.send(
+            "建立備份時發生錯誤。原資料庫沒有被修改，請管理員查看 Railway 紀錄。",
+            ephemeral=True,
+        )
+
+
+@tree.command(
     name="修士狀態",
     description="由管理員確認修士服務是否正常",
 )
@@ -5840,7 +6353,7 @@ async def monk_status(
     await interaction.response.send_message(
         "修士目前在線。\n\n"
         "玩家操作方式：**`/學生資料`、`/今日穿搭推薦`**\n"
-        "公開斜線指令數量：**3**\n"
+        "公開斜線指令數量：**4**\n"
         "AI 教學：**永久停用**\n"
         f"AI 告解：**{confession_ai_status}**\n"
         f"AI 神諭：**{oracle_ai_status}**\n"
