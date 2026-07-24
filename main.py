@@ -2867,6 +2867,17 @@ PLACE_SOURCE_CHOICES = [
     app_commands.Choice(name="舊企劃遷入", value="舊企劃遷入"),
 ]
 
+# 城下町固定分區。資料庫、論壇標籤與玩家選單請統一使用這些名稱。
+PLACE_DISTRICT_CHOICES = [
+    ("⚓ 河岸市集", "河岸市集"),
+    ("⛲ 中央廣場", "中央廣場"),
+    ("🏘️ 麻瓜生活區", "麻瓜生活區"),
+    ("⚒️ 工匠街", "工匠街"),
+    ("🔮 魔法商業區", "魔法商業區"),
+    ("🗝️ 舊城區", "舊城區"),
+    ("🏰 學院大道", "學院大道"),
+]
+
 
 class ReturnToPlayerHomeButton(discord.ui.Button):
     def __init__(self) -> None:
@@ -3128,12 +3139,6 @@ class PlaceModal(discord.ui.Modal, title="學院街區｜地點登記"):
         required=True,
         max_length=80,
     )
-    district = discord.ui.TextInput(
-        label="所在區域",
-        placeholder="學院城東街／星泉河畔／校外住宅區",
-        required=False,
-        max_length=80,
-    )
     operator_name = discord.ui.TextInput(
         label="店主／經營者",
         placeholder="填寫角色名稱；共同經營可填多人",
@@ -3159,12 +3164,14 @@ class PlaceModal(discord.ui.Modal, title="學院街區｜地點登記"):
         *,
         user_id: int,
         place_type: str,
+        district: str,
         source_kind: str,
         is_public: bool,
     ) -> None:
         super().__init__()
         self.user_id = int(user_id)
         self.place_type = place_type
+        self.district = district
         self.source_kind = source_kind
         self.is_public = is_public
 
@@ -3199,11 +3206,11 @@ class PlaceModal(discord.ui.Modal, title="學院街區｜地點登記"):
             )
             return
 
-        place_id = ACADEMY_DB.create_place(
+        ACADEMY_DB.create_place(
             user_id=self.user_id,
             name=str(self.place_name.value),
             place_type=self.place_type,
-            district=str(self.district.value),
+            district=self.district,
             description=str(self.description.value),
             operator_name=str(self.operator_name.value),
             source_kind=self.source_kind,
@@ -3234,11 +3241,6 @@ class EditPlaceModal(discord.ui.Modal, title="編輯地點資料"):
         required=True,
         max_length=120,
     )
-    district = discord.ui.TextInput(
-        label="所在區域",
-        required=False,
-        max_length=80,
-    )
     status = discord.ui.TextInput(
         label="目前狀態",
         placeholder="營業中／使用中／等待重新開張",
@@ -3262,12 +3264,12 @@ class EditPlaceModal(discord.ui.Modal, title="編輯地點資料"):
         self.user_id = int(user_id)
         self.place_id = int(place["id"])
         self.place_type = str(place.get("place_type") or "其他")
+        self.district = str(place.get("district") or "中央廣場")
 
         self.place_name.default = str(place.get("name") or "")
         self.operator_name.default = str(
             place.get("operator_name") or ""
         )
-        self.district.default = str(place.get("district") or "")
         self.status.default = str(place.get("status") or "使用中")
         self.description.default = str(
             place.get("description") or ""
@@ -3307,7 +3309,7 @@ class EditPlaceModal(discord.ui.Modal, title="編輯地點資料"):
             place_id=self.place_id,
             name=str(self.place_name.value),
             operator_name=str(self.operator_name.value),
-            district=str(self.district.value),
+            district=self.district,
             status=str(self.status.value),
             description=str(self.description.value),
         )
@@ -4094,7 +4096,7 @@ class StudentHubView(UserOwnedView):
         await interaction.response.edit_message(
             embed=monk_embed(
                 "🏘️ 新增地點",
-                "選擇地點類型與來源，再決定是否公開。"
+                "選擇地點類型、城下町區域與來源，再決定是否公開。"
                 "商店登記時可以填寫實際店主或共同經營者。",
                 color=0x8B6F47,
             ),
@@ -4126,6 +4128,7 @@ class PlaceRegistrationOptionsView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
         super().__init__(owner_id, timeout=900)
         self.place_type = "商店"
+        self.district = "中央廣場"
         self.source_kind = "新登記"
         self.is_public = True
 
@@ -4147,6 +4150,24 @@ class PlaceRegistrationOptionsView(UserOwnedView):
         self.type_select.callback = self._on_type_selected
         self.add_item(self.type_select)
 
+        district_options = [
+            discord.SelectOption(
+                label=label,
+                value=value,
+                default=value == self.district,
+            )
+            for label, value in PLACE_DISTRICT_CHOICES
+        ]
+        self.district_select = discord.ui.Select(
+            placeholder="選擇要開設的城下町區域",
+            min_values=1,
+            max_values=1,
+            options=district_options,
+            row=1,
+        )
+        self.district_select.callback = self._on_district_selected
+        self.add_item(self.district_select)
+
         source_options = [
             discord.SelectOption(
                 label=choice.name,
@@ -4160,7 +4181,7 @@ class PlaceRegistrationOptionsView(UserOwnedView):
             min_values=1,
             max_values=1,
             options=source_options,
-            row=1,
+            row=2,
         )
         self.source_select.callback = self._on_source_selected
         self.add_item(self.source_select)
@@ -4170,6 +4191,13 @@ class PlaceRegistrationOptionsView(UserOwnedView):
         interaction: discord.Interaction,
     ) -> None:
         self.place_type = self.type_select.values[0]
+        await interaction.response.defer()
+
+    async def _on_district_selected(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        self.district = self.district_select.values[0]
         await interaction.response.defer()
 
     async def _on_source_selected(
@@ -4183,7 +4211,7 @@ class PlaceRegistrationOptionsView(UserOwnedView):
         label="公開顯示：是",
         style=discord.ButtonStyle.success,
         emoji="👁️",
-        row=2,
+        row=3,
     )
     async def toggle_public(
         self,
@@ -4221,6 +4249,7 @@ class PlaceRegistrationOptionsView(UserOwnedView):
             PlaceModal(
                 user_id=self.owner_id,
                 place_type=self.place_type,
+                district=self.district,
                 source_kind=self.source_kind,
                 is_public=self.is_public,
             )
@@ -4324,6 +4353,115 @@ class PlaceManageSelect(discord.ui.Select):
         )
 
 
+class PlaceDistrictSelect(discord.ui.Select):
+    def __init__(
+        self,
+        owner_id: int,
+        place: dict[str, Any],
+    ) -> None:
+        self.owner_id = int(owner_id)
+        self.place_id = int(place["id"])
+        current_district = str(place.get("district") or "")
+        options = [
+            discord.SelectOption(
+                label=label,
+                value=value,
+                default=value == current_district,
+            )
+            for label, value in PLACE_DISTRICT_CHOICES
+        ]
+        super().__init__(
+            placeholder="選擇新的城下町區域",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        current = ACADEMY_DB.get_user_place(
+            user_id=self.owner_id,
+            place_id=self.place_id,
+        )
+        if current is None:
+            await interaction.response.send_message(
+                "找不到這個地點，可能已經被刪除。",
+                ephemeral=True,
+            )
+            return
+
+        updated = ACADEMY_DB.update_place_details(
+            user_id=self.owner_id,
+            place_id=self.place_id,
+            name=str(current.get("name") or ""),
+            operator_name=str(current.get("operator_name") or ""),
+            district=self.values[0],
+            status=str(current.get("status") or "使用中"),
+            description=str(current.get("description") or ""),
+        )
+        if updated is None:
+            await interaction.response.send_message(
+                "區域更新失敗，請重新開啟學生資料再試一次。",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.edit_message(
+            embed=place_detail_embed(updated),
+            view=PlaceDetailManageView(
+                self.owner_id,
+                updated,
+            ),
+        )
+
+
+class PlaceDistrictChangeView(UserOwnedView):
+    def __init__(
+        self,
+        owner_id: int,
+        place: dict[str, Any],
+    ) -> None:
+        super().__init__(owner_id, timeout=900)
+        self.place_id = int(place["id"])
+        self.add_item(PlaceDistrictSelect(owner_id, place))
+
+    @discord.ui.button(
+        label="取消搬遷",
+        style=discord.ButtonStyle.secondary,
+        emoji="↩️",
+        row=1,
+    )
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        place = ACADEMY_DB.get_user_place(
+            user_id=self.owner_id,
+            place_id=self.place_id,
+        )
+        if place is None:
+            await interaction.response.edit_message(
+                embed=student_places_embed(self.owner_id),
+                view=MyPlacesHubView(
+                    self.owner_id,
+                    return_target="student",
+                ),
+            )
+            return
+
+        await interaction.response.edit_message(
+            embed=place_detail_embed(place),
+            view=PlaceDetailManageView(
+                self.owner_id,
+                place,
+            ),
+        )
+
+
 class PlaceDetailManageView(UserOwnedView):
     def __init__(
         self,
@@ -4375,6 +4513,44 @@ class PlaceDetailManageView(UserOwnedView):
                 user_id=self.owner_id,
                 place=current,
             )
+        )
+
+    @discord.ui.button(
+        label="更改區域",
+        style=discord.ButtonStyle.secondary,
+        emoji="🗺️",
+        row=2,
+    )
+    async def change_district(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        current = ACADEMY_DB.get_user_place(
+            user_id=self.owner_id,
+            place_id=int(self.place["id"]),
+        )
+        if current is None:
+            await interaction.response.edit_message(
+                embed=student_places_embed(self.owner_id),
+                view=MyPlacesHubView(
+                    self.owner_id,
+                    return_target="student",
+                ),
+            )
+            return
+
+        await interaction.response.edit_message(
+            embed=monk_embed(
+                f"🗺️ 更改區域｜{current.get('name') or '未命名地點'}",
+                f"目前位於：**{current.get('district') or '未設定'}**\n\n"
+                "從下方選擇新的城下町區域；選取後會立即更新。",
+                color=0x8B6F47,
+            ),
+            view=PlaceDistrictChangeView(
+                self.owner_id,
+                current,
+            ),
         )
 
     @discord.ui.button(
@@ -4912,7 +5088,7 @@ class TownHubView(UserOwnedView):
         await interaction.response.edit_message(
             embed=monk_embed(
                 "🏘️ 城下町｜地點登記",
-                "先選擇類型與來源，再決定是否公開。所有學生地點都可作神諭素材。",
+                "先選擇類型、城下町區域與來源，再決定是否公開。所有學生地點都可作神諭素材。",
                 color=0x8B6F47,
             ),
             view=PlaceRegistrationOptionsView(self.owner_id),
