@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# stern-monk-zh-tw v27.1 single-file deploy
+# stern-monk-zh-tw v28 district-guide deploy
 # 主要程式碼集中於本檔；data/ 僅保存教學與台詞資料。
 
 
@@ -2853,6 +2853,8 @@ class MonkCommandTree(app_commands.CommandTree):
 class MonkClient(discord.Client):
     def __init__(self) -> None:
         intents = discord.Intents.default()
+        # 店鋪封面需要讀取論壇訊息中的附件與嵌入圖片。
+        intents.message_content = True
         super().__init__(intents=intents)
         self.tree = MonkCommandTree(self)
         self._player_panels_restored = False
@@ -2966,6 +2968,122 @@ PLACE_DISTRICT_CHOICES = [
     ("🗝️ 舊城區", "舊城區"),
     ("🏰 學院大道", "學院大道"),
 ]
+
+SHOP_PLACE_TYPES = {"商店", "餐館", "書店", "魔藥工房", "診所"}
+DISTRICT_OVERVIEW_KEY = "城下町總覽"
+DISTRICT_ASSET_ROOT = Path(__file__).resolve().parent / "assets" / "districts"
+
+# 分區導覽圖片直接跟著 Railway 部署檔案上傳。
+# 玩家店鋪封面仍然讀取玩家自己綁定的 Discord 論壇貼文。
+DISTRICT_GUIDE: dict[str, dict[str, str]] = {
+    DISTRICT_OVERVIEW_KEY: {
+        "label": "🌆 城下町總覽",
+        "filename": "town-overview.webp",
+        "description": (
+            "坐落於魔法學院山腳下的繁華街區。先選擇想逛的區域，"
+            "再查看該區由學生經營的公開店鋪。"
+        ),
+    },
+    "河岸市集": {
+        "label": "⚓ 河岸市集",
+        "filename": "riverside-market.webp",
+        "description": "沿著運河與石橋展開的市集，聚集魚貨、香料、旅人補給與稀有素材。",
+    },
+    "中央廣場": {
+        "label": "⛲ 中央廣場",
+        "filename": "central-square.webp",
+        "description": "城下町最熱鬧的中心，節慶、表演、餐飲與各類臨時活動都會在此出現。",
+    },
+    "麻瓜生活區": {
+        "label": "🏘️ 麻瓜生活區",
+        "filename": "muggle-life.webp",
+        "description": "以日常生活為主的街區，適合烘焙、雜貨、服飾、理髮與咖啡店。",
+    },
+    "工匠街": {
+        "label": "⚒️ 工匠街",
+        "filename": "artisan-street.webp",
+        "description": "鍛造、裁縫、木工、裝備維修與魔法加工聲此起彼落的職人街道。",
+    },
+    "魔法商業區": {
+        "label": "🔮 魔法商業區",
+        "filename": "magic-commercial.webp",
+        "description": "魔藥、魔杖、符文、占卜與魔法寵物用品最集中的華麗商業區。",
+    },
+    "舊城區": {
+        "label": "🗝️ 舊城區",
+        "filename": "old-town.webp",
+        "description": "巷道交錯、歷史悠久的街區，古物、舊書、情報與神祕委託在此流通。",
+    },
+    "學院大道": {
+        "label": "🏰 學院大道",
+        "filename": "academy-avenue.webp",
+        "description": "通往學院正門的主要道路，聚集制服、文具、書店與學生服務設施。",
+    },
+}
+
+
+def list_public_shop_places(district: str | None = None) -> list[dict[str, Any]]:
+    places = [
+        place
+        for place in ACADEMY_DB.list_public_places()
+        if place["place_type"] in SHOP_PLACE_TYPES
+    ]
+    if district:
+        places = [
+            place
+            for place in places
+            if str(place.get("district") or "") == district
+        ]
+    return places
+
+
+def town_hub_embed() -> discord.Embed:
+    return monk_embed(
+        "🏘️ 禊月堂魔法學院城下町",
+        "依區域尋找公開店鋪、查看校外住處，或管理自己的店鋪與住所。",
+        color=0x8B6F47,
+    )
+
+
+def district_guide_embed(
+    district_key: str,
+    *,
+    shop_count: int,
+) -> tuple[discord.Embed, discord.File | None]:
+    info = DISTRICT_GUIDE.get(
+        district_key,
+        DISTRICT_GUIDE[DISTRICT_OVERVIEW_KEY],
+    )
+    embed = monk_embed(
+        f"🗺️ 城下町分區｜{info['label']}",
+        info["description"],
+        color=0x8B6F47,
+    )
+    embed.add_field(
+        name="目前可瀏覽",
+        value=f"公開店鋪 **{shop_count}** 間",
+        inline=True,
+    )
+    embed.add_field(
+        name="操作方式",
+        value=(
+            "從選單切換區域，再按「查看本區店鋪」。"
+            if district_key != DISTRICT_OVERVIEW_KEY
+            else "從選單挑選區域，或直接查看全部公開店鋪。"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="分區圖片由修士從 Railway 部署素材載入。")
+
+    filename = info["filename"]
+    asset_path = DISTRICT_ASSET_ROOT / filename
+    if not asset_path.is_file():
+        logger.warning("找不到城下町分區圖片：%s", asset_path)
+        return embed, None
+
+    embed.set_image(url=f"attachment://{filename}")
+    return embed, discord.File(asset_path, filename=filename)
+
 
 SHOP_LINK_PATTERN = re.compile(
     r"https?://(?:(?:canary|ptb)\.)?discord(?:app)?\.com/"
@@ -3212,6 +3330,7 @@ class ReturnToPlayerHomeButton(discord.ui.Button):
                 owner_id,
                 interaction.user.display_name,
             ),
+            attachments=[],
             view=PlayerPanelHomeView(owner_id),
         )
 
@@ -3646,20 +3765,37 @@ def place_embed(
     total: int,
     image_url: str | None = None,
 ) -> discord.Embed:
+    title_icon = "🏪" if place.get("place_type") in SHOP_PLACE_TYPES else "🏠"
     embed = monk_embed(
-        f"🏘️ 學院街區｜{place['name']}",
-        f"**類型**：{place['place_type']}\n"
-        f"**經營者／居住者**："
-        f"{place.get('operator_name') or place.get('owner_name') or '未設定'}\n"
-        f"**區域**：{place.get('district') or '未設定'}\n"
-        f"**狀態**：{place.get('status') or '未設定'}\n"
-        f"**來源**：{place.get('source_kind') or '新登記'}\n\n"
-        f"{place.get('description') or '沒有簡介。'}",
+        f"{title_icon} 城下町地點｜{place['name']}",
+        place.get("description") or "這個地點目前沒有填寫簡介。",
         color=0x8B6F47,
+    )
+    embed.add_field(
+        name="店鋪資料",
+        value=(
+            f"**類型**：{place.get('place_type') or '未設定'}\n"
+            f"**經營者／居住者**："
+            f"{place.get('operator_name') or place.get('owner_name') or '未設定'}"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="位置與狀態",
+        value=(
+            f"**區域**：{place.get('district') or '未設定'}\n"
+            f"**狀態**：{place.get('status') or '未設定'}"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="登記來源",
+        value=place.get("source_kind") or "新登記",
+        inline=False,
     )
     if image_url:
         embed.set_image(url=image_url)
-    embed.set_footer(text=f"地點 {index + 1}／{total}")
+    embed.set_footer(text=f"本區地點 {index + 1}／{total}")
     return embed
 
 
@@ -3684,16 +3820,23 @@ class PlacesView(UserOwnedView):
         self,
         owner_id: int,
         places: list[dict[str, Any]],
+        *,
+        return_district: str | None = None,
     ) -> None:
         super().__init__(owner_id)
         self.places = places
         self.index = 0
+        self.return_district = return_district
         self.shop_link_button: discord.ui.Button | None = None
         self._refresh_buttons()
 
     def _refresh_buttons(self) -> None:
         self.previous_page.disabled = self.index <= 0
         self.next_page.disabled = self.index >= len(self.places) - 1
+        self.back_to_source.label = (
+            "回到分區導覽" if self.return_district else "返回城下町"
+        )
+        self.back_to_source.emoji = "🗺️" if self.return_district else "↩️"
 
         if self.shop_link_button is not None:
             self.remove_item(self.shop_link_button)
@@ -3702,7 +3845,7 @@ class PlacesView(UserOwnedView):
         url = shop_post_url(self.places[self.index])
         if url:
             self.shop_link_button = discord.ui.Button(
-                label="前往店鋪",
+                label="開啟店鋪貼文",
                 emoji="🏪",
                 style=discord.ButtonStyle.link,
                 url=url,
@@ -3719,9 +3862,10 @@ class PlacesView(UserOwnedView):
         )
 
     @discord.ui.button(
-        label="上一頁",
+        label="上一家",
         style=discord.ButtonStyle.secondary,
         emoji="◀️",
+        row=0,
     )
     async def previous_page(
         self,
@@ -3733,13 +3877,15 @@ class PlacesView(UserOwnedView):
         await interaction.response.defer()
         await interaction.edit_original_response(
             embed=await self.current_embed(interaction.client),
+            attachments=[],
             view=self,
         )
 
     @discord.ui.button(
-        label="下一頁",
+        label="下一家",
         style=discord.ButtonStyle.secondary,
         emoji="▶️",
+        row=0,
     )
     async def next_page(
         self,
@@ -3751,7 +3897,39 @@ class PlacesView(UserOwnedView):
         await interaction.response.defer()
         await interaction.edit_original_response(
             embed=await self.current_embed(interaction.client),
+            attachments=[],
             view=self,
+        )
+
+    @discord.ui.button(
+        label="回到分區導覽",
+        style=discord.ButtonStyle.secondary,
+        emoji="🗺️",
+        row=1,
+    )
+    async def back_to_source(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if self.return_district:
+            view = DistrictBrowserView(
+                self.owner_id,
+                selected_key=self.return_district,
+            )
+            embed, file = view.render()
+            attachments = [file] if file is not None else []
+            await interaction.response.edit_message(
+                embed=embed,
+                attachments=attachments,
+                view=view,
+            )
+            return
+
+        await interaction.response.edit_message(
+            embed=town_hub_embed(),
+            attachments=[],
+            view=TownHubView(self.owner_id),
         )
 
 
@@ -4625,27 +4803,45 @@ def place_detail_embed(
     *,
     image_url: str | None = None,
 ) -> discord.Embed:
-    visibility = "公開" if place.get("is_public") else "不公開"
-    shop_status = "已綁定" if shop_post_url(place) else "尚未綁定"
+    visibility = "👁️ 公開" if place.get("is_public") else "🙈 不公開"
+    shop_status = "✅ 已連結" if shop_post_url(place) else "尚未設定"
+    title_icon = "🏪" if place.get("place_type") in SHOP_PLACE_TYPES else "📍"
     embed = monk_embed(
-        f"📍 地點管理｜{place.get('name') or '未命名地點'}",
-        f"**地點編號**：#{place.get('id')}\n"
-        f"**類型**：{place.get('place_type') or '未設定'}\n"
-        f"**經營者／居住者**：{place.get('operator_name') or '未設定'}\n"
-        f"**區域**：{place.get('district') or '未設定'}\n"
-        f"**狀態**：{place.get('status') or '未設定'}\n"
-        f"**公開狀態**：{visibility}\n"
-        f"**店鋪貼文**：{shop_status}\n"
-        f"**可作神諭素材**：是\n"
-        f"**來源**：{place.get('source_kind') or '新登記'}\n\n"
-        f"**地點簡介**\n"
-        f"{place.get('description') or '沒有簡介。'}",
+        f"{title_icon} 地點管理｜{place.get('name') or '未命名地點'}",
+        place.get("description") or "這個地點目前沒有填寫簡介。",
         color=0x8B6F47,
+    )
+    embed.add_field(
+        name="基本資料",
+        value=(
+            f"**編號**：#{place.get('id')}\n"
+            f"**類型**：{place.get('place_type') or '未設定'}\n"
+            f"**經營者／居住者**：{place.get('operator_name') or '未設定'}"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="位置與營業狀態",
+        value=(
+            f"**區域**：{place.get('district') or '未設定'}\n"
+            f"**狀態**：{place.get('status') or '未設定'}\n"
+            f"**來源**：{place.get('source_kind') or '新登記'}"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="公開與店鋪貼文",
+        value=(
+            f"**公開狀態**：{visibility}\n"
+            f"**店鋪貼文**：{shop_status}\n"
+            "**可作神諭素材**：是"
+        ),
+        inline=False,
     )
     if image_url:
         embed.set_image(url=image_url)
     embed.set_footer(
-        text="此管理頁公開可見；只有本人能編輯、綁定貼文、切換公開或刪除。"
+        text="店鋪封面取自綁定貼文；只有本人可以修改這些設定。"
     )
     return embed
 
@@ -4658,9 +4854,9 @@ async def build_place_detail_embed(
     return place_detail_embed(place, image_url=image_url)
 
 
-class ShopLinkModal(discord.ui.Modal, title="綁定店鋪論壇貼文"):
+class ShopLinkModal(discord.ui.Modal, title="設定店鋪論壇貼文"):
     shop_link = discord.ui.TextInput(
-        label="Discord 論壇貼文／訊息連結",
+        label="店鋪貼文或封面訊息連結",
         placeholder="在店鋪貼文按右鍵 → 複製訊息連結",
         required=True,
         max_length=300,
@@ -4924,7 +5120,7 @@ class PlaceDistrictChangeView(UserOwnedView):
         self.add_item(PlaceDistrictSelect(owner_id, place))
 
     @discord.ui.button(
-        label="取消搬遷",
+        label="返回地點管理",
         style=discord.ButtonStyle.secondary,
         emoji="↩️",
         row=1,
@@ -4972,15 +5168,20 @@ class PlaceDetailManageView(UserOwnedView):
     def _refresh_buttons(self) -> None:
         is_public = bool(self.place.get("is_public"))
         self.toggle_visibility.label = (
-            f"公開顯示：{'是' if is_public else '否'}"
+            "改為不公開" if is_public else "改為公開"
         )
+        self.toggle_visibility.emoji = "🙈" if is_public else "👁️"
         self.toggle_visibility.style = (
-            discord.ButtonStyle.success
+            discord.ButtonStyle.secondary
             if is_public
-            else discord.ButtonStyle.secondary
+            else discord.ButtonStyle.success
         )
 
         has_shop_link = shop_post_url(self.place) is not None
+        self.bind_shop.label = (
+            "更換店鋪貼文" if has_shop_link else "設定店鋪貼文"
+        )
+        self.bind_shop.emoji = "🔄" if has_shop_link else "🔗"
         self.unlink_shop.disabled = not has_shop_link
 
         if self.shop_link_button is not None:
@@ -4990,16 +5191,16 @@ class PlaceDetailManageView(UserOwnedView):
         url = shop_post_url(self.place)
         if url:
             self.shop_link_button = discord.ui.Button(
-                label="前往店鋪",
+                label="開啟店鋪貼文",
                 emoji="🏪",
                 style=discord.ButtonStyle.link,
                 url=url,
-                row=3,
+                row=2,
             )
             self.add_item(self.shop_link_button)
 
     @discord.ui.button(
-        label="編輯地點",
+        label="修改資料",
         style=discord.ButtonStyle.primary,
         emoji="✏️",
         row=1,
@@ -5031,9 +5232,9 @@ class PlaceDetailManageView(UserOwnedView):
         )
 
     @discord.ui.button(
-        label="公開顯示：是",
-        style=discord.ButtonStyle.success,
-        emoji="👁️",
+        label="改為不公開",
+        style=discord.ButtonStyle.secondary,
+        emoji="🙈",
         row=1,
     )
     async def toggle_visibility(
@@ -5065,10 +5266,10 @@ class PlaceDetailManageView(UserOwnedView):
         )
 
     @discord.ui.button(
-        label="刪除此地點",
+        label="刪除地點",
         style=discord.ButtonStyle.danger,
         emoji="🗑️",
-        row=1,
+        row=3,
     )
     async def delete_place(
         self,
@@ -5089,10 +5290,10 @@ class PlaceDetailManageView(UserOwnedView):
         )
 
     @discord.ui.button(
-        label="更改區域",
+        label="搬遷區域",
         style=discord.ButtonStyle.secondary,
         emoji="🗺️",
-        row=2,
+        row=1,
     )
     async def change_district(
         self,
@@ -5115,7 +5316,7 @@ class PlaceDetailManageView(UserOwnedView):
 
         await interaction.response.edit_message(
             embed=monk_embed(
-                f"🗺️ 更改區域｜{current.get('name') or '未命名地點'}",
+                f"🗺️ 搬遷區域｜{current.get('name') or '未命名地點'}",
                 f"目前位於：**{current.get('district') or '未設定'}**\n\n"
                 "從下方選擇新的城下町區域；選取後會立即更新。",
                 color=0x8B6F47,
@@ -5127,10 +5328,10 @@ class PlaceDetailManageView(UserOwnedView):
         )
 
     @discord.ui.button(
-        label="返回地點總覽",
+        label="回到我的地點",
         style=discord.ButtonStyle.secondary,
-        emoji="↩️",
-        row=2,
+        emoji="📋",
+        row=3,
     )
     async def back_to_places(
         self,
@@ -5146,10 +5347,10 @@ class PlaceDetailManageView(UserOwnedView):
         )
 
     @discord.ui.button(
-        label="綁定／更新店鋪貼文",
+        label="設定店鋪貼文",
         style=discord.ButtonStyle.success,
         emoji="🔗",
-        row=3,
+        row=2,
     )
     async def bind_shop(
         self,
@@ -5171,7 +5372,7 @@ class PlaceDetailManageView(UserOwnedView):
         )
 
     @discord.ui.button(
-        label="解除店鋪連結",
+        label="解除貼文綁定",
         style=discord.ButtonStyle.secondary,
         emoji="⛓️‍💥",
         row=3,
@@ -5548,12 +5749,135 @@ class MyPlacesHubView(UserOwnedView):
             return
 
         await interaction.response.edit_message(
-            embed=monk_embed(
-                "🏘️ 禊月堂魔法學院城下町",
-                "查看學生商店街、校外居住地，"
-                "或直接管理自己的店鋪與住所。",
-                color=0x8B6F47,
-            ),
+            embed=town_hub_embed(),
+            attachments=[],
+            view=TownHubView(self.owner_id),
+        )
+
+
+class DistrictGuideSelect(discord.ui.Select):
+    def __init__(self, selected_key: str) -> None:
+        options = [
+            discord.SelectOption(
+                label=info["label"],
+                value=key,
+                default=key == selected_key,
+            )
+            for key, info in DISTRICT_GUIDE.items()
+        ]
+        super().__init__(
+            placeholder="選擇要前往的城下町區域",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        view = self.view
+        if not isinstance(view, DistrictBrowserView):
+            return
+
+        view.selected_key = self.values[0]
+        for option in self.options:
+            option.default = option.value == view.selected_key
+        view.refresh_buttons()
+        embed, file = view.render()
+        attachments = [file] if file is not None else []
+        await interaction.response.edit_message(
+            embed=embed,
+            attachments=attachments,
+            view=view,
+        )
+
+
+class DistrictBrowserView(UserOwnedView):
+    def __init__(
+        self,
+        owner_id: int,
+        *,
+        selected_key: str = DISTRICT_OVERVIEW_KEY,
+    ) -> None:
+        super().__init__(owner_id, timeout=900)
+        self.selected_key = (
+            selected_key
+            if selected_key in DISTRICT_GUIDE
+            else DISTRICT_OVERVIEW_KEY
+        )
+        self.add_item(DistrictGuideSelect(self.selected_key))
+        self.refresh_buttons()
+
+    def current_places(self) -> list[dict[str, Any]]:
+        district = (
+            None
+            if self.selected_key == DISTRICT_OVERVIEW_KEY
+            else self.selected_key
+        )
+        return list_public_shop_places(district)
+
+    def refresh_buttons(self) -> None:
+        places = self.current_places()
+        self.browse_shops.disabled = not places
+        self.browse_shops.label = (
+            "查看全部店鋪"
+            if self.selected_key == DISTRICT_OVERVIEW_KEY
+            else "查看本區店鋪"
+        )
+
+    def render(self) -> tuple[discord.Embed, discord.File | None]:
+        return district_guide_embed(
+            self.selected_key,
+            shop_count=len(self.current_places()),
+        )
+
+    @discord.ui.button(
+        label="查看全部店鋪",
+        style=discord.ButtonStyle.success,
+        emoji="🏪",
+        row=1,
+    )
+    async def browse_shops(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        places = self.current_places()
+        if not places:
+            await interaction.response.send_message(
+                "這個區域目前還沒有公開店鋪。",
+                ephemeral=True,
+            )
+            return
+
+        view = PlacesView(
+            self.owner_id,
+            places,
+            return_district=self.selected_key,
+        )
+        await interaction.response.defer()
+        await interaction.edit_original_response(
+            embed=await view.current_embed(interaction.client),
+            attachments=[],
+            view=view,
+        )
+
+    @discord.ui.button(
+        label="返回城下町",
+        style=discord.ButtonStyle.secondary,
+        emoji="↩️",
+        row=1,
+    )
+    async def back_to_town(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=town_hub_embed(),
+            attachments=[],
             view=TownHubView(self.owner_id),
         )
 
@@ -5575,6 +5899,7 @@ class TownHubView(UserOwnedView):
                     empty_message,
                     color=0x8B6F47,
                 ),
+                attachments=[],
                 view=TownHubView(self.owner_id),
             )
             return
@@ -5583,13 +5908,14 @@ class TownHubView(UserOwnedView):
         await interaction.response.defer()
         await interaction.edit_original_response(
             embed=await view.current_embed(interaction.client),
+            attachments=[],
             view=view,
         )
 
     @discord.ui.button(
-        label="商店街",
+        label="分區找店",
         style=discord.ButtonStyle.success,
-        emoji="🛍️",
+        emoji="🗺️",
         row=0,
     )
     async def shops(
@@ -5597,20 +5923,17 @@ class TownHubView(UserOwnedView):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        shop_types = {"商店", "餐館", "書店", "魔藥工房", "診所"}
-        places = [
-            place
-            for place in ACADEMY_DB.list_public_places()
-            if place["place_type"] in shop_types
-        ]
-        await self._show_place_list(
-            interaction,
-            places,
-            "城下町目前還沒有公開營業的店鋪。",
+        view = DistrictBrowserView(self.owner_id)
+        embed, file = view.render()
+        attachments = [file] if file is not None else []
+        await interaction.response.edit_message(
+            embed=embed,
+            attachments=attachments,
+            view=view,
         )
 
     @discord.ui.button(
-        label="校外居住地",
+        label="公開住處",
         style=discord.ButtonStyle.primary,
         emoji="🏠",
         row=0,
@@ -5628,10 +5951,10 @@ class TownHubView(UserOwnedView):
         )
 
     @discord.ui.button(
-        label="我的地點",
+        label="管理我的地點",
         style=discord.ButtonStyle.secondary,
         emoji="📍",
-        row=0,
+        row=1,
     )
     async def my_places(
         self,
@@ -5640,6 +5963,7 @@ class TownHubView(UserOwnedView):
     ) -> None:
         await interaction.response.edit_message(
             embed=public_my_places_embed(self.owner_id),
+            attachments=[],
             view=MyPlacesHubView(
                 self.owner_id,
                 return_target="town",
@@ -5647,10 +5971,10 @@ class TownHubView(UserOwnedView):
         )
 
     @discord.ui.button(
-        label="登記地點",
+        label="新增地點",
         style=discord.ButtonStyle.secondary,
         emoji="➕",
-        row=0,
+        row=1,
     )
     async def register_place(
         self,
@@ -5663,11 +5987,12 @@ class TownHubView(UserOwnedView):
                 "先選擇類型、城下町區域與來源，再決定是否公開。所有學生地點都可作神諭素材。",
                 color=0x8B6F47,
             ),
+            attachments=[],
             view=PlaceRegistrationOptionsView(self.owner_id),
         )
 
     @discord.ui.button(
-        label="公開設定",
+        label="調整公開狀態",
         style=discord.ButtonStyle.secondary,
         emoji="👁️",
         row=1,
@@ -5693,10 +6018,11 @@ class TownHubView(UserOwnedView):
             embed=monk_embed(
                 "👁️ 地點公開設定",
                 "選擇地點後，即可切換公開或不公開。"
-                "不公開的地點不會出現在商店街或校外居住地名單。"
+                "不公開的地點不會出現在分區店鋪或校外住處名單。"
                 + note,
                 color=0x8B6F47,
             ),
+            attachments=[],
             view=PlaceVisibilityPickerView(self.owner_id, places),
         )
 
