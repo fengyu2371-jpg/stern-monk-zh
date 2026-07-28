@@ -2987,6 +2987,39 @@ PLACE_DISTRICT_CHOICES = [
 SHOP_PLACE_TYPES = {"商店", "餐館", "書店", "魔藥工房", "診所"}
 DISTRICT_OVERVIEW_KEY = "城下町總覽"
 DISTRICT_ASSET_ROOT = Path(__file__).resolve().parent / "assets" / "districts"
+TOWN_LIFE_ASSET_ROOT = Path(__file__).resolve().parent / "assets" / "town_life"
+TOWN_LIFE_ROUTE_IMAGES: dict[str, str] = {
+    "farming": "farm.webp",
+    "ranch": "ranch.webp",
+    "fishing": "fishing.webp",
+    "crystal": "mining.webp",
+}
+
+
+def _town_life_embed_with_image(
+    embed: discord.Embed,
+    route_key: str,
+) -> discord.Embed:
+    filename = TOWN_LIFE_ROUTE_IMAGES.get(route_key)
+    if not filename:
+        return embed
+    asset_path = TOWN_LIFE_ASSET_ROOT / filename
+    if not asset_path.is_file():
+        logger.warning("找不到城下町職業圖片：%s", asset_path)
+        return embed
+    embed.set_image(url=f"attachment://{filename}")
+    return embed
+
+
+def town_life_route_attachments(route_key: str) -> list[discord.File]:
+    filename = TOWN_LIFE_ROUTE_IMAGES.get(route_key)
+    if not filename:
+        return []
+    asset_path = TOWN_LIFE_ASSET_ROOT / filename
+    if not asset_path.is_file():
+        logger.warning("找不到城下町職業圖片：%s", asset_path)
+        return []
+    return [discord.File(asset_path, filename=filename)]
 
 # 分區導覽圖片直接跟著 Railway 部署檔案上傳。
 # 玩家店鋪封面仍然讀取玩家自己綁定的 Discord 論壇貼文。
@@ -6015,7 +6048,8 @@ def farm_embed(user_id: int, *, notice: str = "") -> discord.Embed:
     )
     if notice:
         description = f"**本次結果**\n{notice}\n\n{description}"
-    return monk_embed("農牧師｜三塊農田", description, color=0x76965A)
+    embed = monk_embed("農牧師｜三塊農田", description, color=0x76965A)
+    return _town_life_embed_with_image(embed, "farming")
 
 
 def ranch_embed(user_id: int, *, notice: str = "") -> discord.Embed:
@@ -6034,7 +6068,8 @@ def ranch_embed(user_id: int, *, notice: str = "") -> discord.Embed:
     )
     if notice:
         description = f"**本次結果**\n{notice}\n\n{description}"
-    return monk_embed("農牧師｜畜牧場", description, color=0xA07B4F)
+    embed = monk_embed("農牧師｜畜牧場", description, color=0xA07B4F)
+    return _town_life_embed_with_image(embed, "ranch")
 
 
 def fishing_embed(user_id: int, *, notice: str = "") -> discord.Embed:
@@ -6049,7 +6084,8 @@ def fishing_embed(user_id: int, *, notice: str = "") -> discord.Embed:
     )
     if notice:
         description = f"**本次結果**\n{notice}\n\n{description}"
-    return monk_embed("漁採師｜河岸與野外", description, color=0x4F7F91)
+    embed = monk_embed("漁採師｜河岸與野外", description, color=0x4F7F91)
+    return _town_life_embed_with_image(embed, "fishing")
 
 
 def mining_embed(user_id: int, *, notice: str = "") -> discord.Embed:
@@ -6067,7 +6103,8 @@ def mining_embed(user_id: int, *, notice: str = "") -> discord.Embed:
     )
     if notice:
         description = f"**本次結果**\n{notice}\n\n{description}"
-    return monk_embed("魔晶礦師｜礦坑與精煉", description, color=0x765A91)
+    embed = monk_embed("魔晶礦師｜礦坑與精煉", description, color=0x765A91)
+    return _town_life_embed_with_image(embed, "crystal")
 
 
 def inventory_market_embed(user_id: int, *, notice: str = "") -> discord.Embed:
@@ -6141,7 +6178,7 @@ class SeedPurchaseSelect(discord.ui.Select):
         notice = f"購買 {item_name(item_key)}×5，支付 {int(result['cost'])} 金幣。"
         await interaction.response.edit_message(
             embed=farm_embed(self.owner_id, notice=notice),
-            attachments=[],
+            attachments=town_life_route_attachments("farming"),
             view=FarmRouteView(self.owner_id),
         )
 
@@ -6179,7 +6216,7 @@ class CropPlantSelect(discord.ui.Select):
         )
         await interaction.response.edit_message(
             embed=farm_embed(self.owner_id, notice=notice),
-            attachments=[],
+            attachments=town_life_route_attachments("farming"),
             view=FarmRouteView(self.owner_id),
         )
 
@@ -6196,7 +6233,7 @@ class TownLifeHubView(UserOwnedView):
     ) -> None:
         await interaction.response.edit_message(
             embed=farm_embed(self.owner_id),
-            attachments=[],
+            attachments=town_life_route_attachments("farming"),
             view=FarmRouteView(self.owner_id),
         )
 
@@ -6208,7 +6245,7 @@ class TownLifeHubView(UserOwnedView):
     ) -> None:
         await interaction.response.edit_message(
             embed=fishing_embed(self.owner_id),
-            attachments=[],
+            attachments=town_life_route_attachments("fishing"),
             view=FishingRouteView(self.owner_id),
         )
 
@@ -6220,7 +6257,7 @@ class TownLifeHubView(UserOwnedView):
     ) -> None:
         await interaction.response.edit_message(
             embed=mining_embed(self.owner_id),
-            attachments=[],
+            attachments=town_life_route_attachments("crystal"),
             view=CrystalRouteView(self.owner_id),
         )
 
@@ -6343,7 +6380,7 @@ class FarmRouteView(UserOwnedView):
         notice = f"收成完成：{rewards}；農牧經驗 +{int(result['exp_gain'])}。"
         await interaction.response.edit_message(
             embed=farm_embed(self.owner_id, notice=notice),
-            attachments=[],
+            attachments=town_life_route_attachments("farming"),
             view=FarmRouteView(self.owner_id),
         )
 
@@ -6351,7 +6388,7 @@ class FarmRouteView(UserOwnedView):
     async def ranch(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.edit_message(
             embed=ranch_embed(self.owner_id),
-            attachments=[],
+            attachments=town_life_route_attachments("ranch"),
             view=RanchView(self.owner_id),
         )
 
@@ -6381,7 +6418,7 @@ class RanchView(UserOwnedView):
         )
         await interaction.response.edit_message(
             embed=ranch_embed(self.owner_id, notice=notice),
-            attachments=[],
+            attachments=town_life_route_attachments("ranch"),
             view=RanchView(self.owner_id),
         )
 
@@ -6397,7 +6434,7 @@ class RanchView(UserOwnedView):
         )
         await interaction.response.edit_message(
             embed=ranch_embed(self.owner_id, notice=notice),
-            attachments=[],
+            attachments=town_life_route_attachments("ranch"),
             view=RanchView(self.owner_id),
         )
 
@@ -6419,7 +6456,7 @@ class RanchView(UserOwnedView):
         notice = f"購買飼料×10，支付 {int(result['cost'])} 金幣。"
         await interaction.response.edit_message(
             embed=ranch_embed(self.owner_id, notice=notice),
-            attachments=[],
+            attachments=town_life_route_attachments("ranch"),
             view=RanchView(self.owner_id),
         )
 
@@ -6435,7 +6472,7 @@ class RanchView(UserOwnedView):
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.edit_message(
             embed=farm_embed(self.owner_id),
-            attachments=[],
+            attachments=town_life_route_attachments("farming"),
             view=FarmRouteView(self.owner_id),
         )
 
@@ -6457,7 +6494,7 @@ class FishingRouteView(UserOwnedView):
         )
         await interaction.response.edit_message(
             embed=fishing_embed(self.owner_id, notice=notice),
-            attachments=[],
+            attachments=town_life_route_attachments("fishing"),
             view=FishingRouteView(self.owner_id),
         )
 
@@ -6471,7 +6508,7 @@ class FishingRouteView(UserOwnedView):
         notice = f"採集到 {item_name(str(result['item_key']))}×{int(result['quantity'])}，消耗 6 體力。"
         await interaction.response.edit_message(
             embed=fishing_embed(self.owner_id, notice=notice),
-            attachments=[],
+            attachments=town_life_route_attachments("fishing"),
             view=FishingRouteView(self.owner_id),
         )
 
@@ -6509,7 +6546,7 @@ class CrystalRouteView(UserOwnedView):
         )
         await interaction.response.edit_message(
             embed=mining_embed(self.owner_id, notice=notice),
-            attachments=[],
+            attachments=town_life_route_attachments("crystal"),
             view=CrystalRouteView(self.owner_id),
         )
 
@@ -6523,7 +6560,7 @@ class CrystalRouteView(UserOwnedView):
         notice = "消耗 2 個魔法水晶原礦與 1 個鐵礦，完成 1 個精煉魔法水晶。"
         await interaction.response.edit_message(
             embed=mining_embed(self.owner_id, notice=notice),
-            attachments=[],
+            attachments=town_life_route_attachments("crystal"),
             view=CrystalRouteView(self.owner_id),
         )
 
