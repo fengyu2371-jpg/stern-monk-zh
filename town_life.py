@@ -18,7 +18,7 @@ INITIAL_STAMINA = 1000
 MAX_STAMINA = 1000
 INITIAL_SPIRIT = 100
 MAX_SPIRIT = 100
-MAX_DAILY_FOOD_STAMINA = 400
+MAX_DAILY_FOOD_STAMINA = 600
 
 
 class TownLifeError(RuntimeError):
@@ -210,6 +210,15 @@ ITEM_CONFIG: dict[str, dict[str, Any]] = {
     "carrot_soup": {"name": "胡蘿蔔濃湯", "sell": 0, "category": "food"},
     "farm_breakfast": {"name": "農家早餐", "sell": 0, "category": "food"},
     "moon_trout_steak": {"name": "香煎月光鱒", "sell": 0, "category": "food"},
+    "berry_plate": {"name": "野莓果盤", "sell": 0, "category": "food"},
+    "roasted_carrot": {"name": "烤胡蘿蔔", "sell": 0, "category": "food"},
+    "boiled_egg": {"name": "水煮蛋", "sell": 0, "category": "food"},
+    "wheat_bread": {"name": "小麥麵包", "sell": 0, "category": "food"},
+    "herb_soup": {"name": "野菜湯", "sell": 0, "category": "food"},
+    "milk_egg_stew": {"name": "牛奶燉蛋", "sell": 0, "category": "food"},
+    "silver_carp_steak": {"name": "香煎銀鱗鯉", "sell": 0, "category": "food"},
+    "moon_trout_platter": {"name": "月光鱒套餐", "sell": 0, "category": "food"},
+    "stamina_potion": {"name": "體力藥水", "buy": 250, "sell": 0, "category": "other"},
 }
 
 
@@ -226,30 +235,94 @@ UPGRADE_MATERIAL_KEYS = {
 FOOD_RECIPE_CONFIG: dict[str, dict[str, Any]] = {
     "grilled_fish": {
         "name": "炭烤河魚",
-        "route": "fishing",
+        "route": "stove",
         "ingredients": {"river_fish": 1, "branch": 1},
         "spirit_restore": 12,
-        "stamina_restore": 60,
+        "stamina_restore": 90,
     },
     "carrot_soup": {
         "name": "胡蘿蔔濃湯",
-        "route": "farming",
+        "route": "stove",
         "ingredients": {"carrot": 2, "milk": 1},
         "spirit_restore": 25,
         "stamina_restore": 100,
     },
     "farm_breakfast": {
         "name": "農家早餐",
-        "route": "farming",
+        "route": "stove",
         "ingredients": {"wheat": 1, "egg": 2, "milk": 1},
         "spirit_restore": 40,
         "stamina_restore": 180,
     },
     "moon_trout_steak": {
         "name": "香煎月光鱒",
-        "route": "fishing",
+        "route": "stove",
         "ingredients": {"moon_trout": 1, "moon_herb": 1},
         "spirit_restore": 50,
+        "stamina_restore": 250,
+    },
+    "berry_plate": {
+        "name": "野莓果盤",
+        "route": "stove",
+        "ingredients": {"wild_berry": 2},
+        "spirit_restore": 5,
+        "stamina_restore": 40,
+    },
+    "roasted_carrot": {
+        "name": "烤胡蘿蔔",
+        "route": "stove",
+        "ingredients": {"carrot": 2},
+        "spirit_restore": 8,
+        "stamina_restore": 60,
+    },
+    "boiled_egg": {
+        "name": "水煮蛋",
+        "route": "stove",
+        "ingredients": {"egg": 1},
+        "spirit_restore": 8,
+        "stamina_restore": 70,
+    },
+    "wheat_bread": {
+        "name": "小麥麵包",
+        "route": "stove",
+        "ingredients": {"wheat": 3},
+        "spirit_restore": 10,
+        "stamina_restore": 120,
+    },
+    "herb_soup": {
+        "name": "野菜湯",
+        "route": "stove",
+        "ingredients": {"carrot": 1, "wild_herb": 1},
+        "spirit_restore": 18,
+        "stamina_restore": 140,
+    },
+    "milk_egg_stew": {
+        "name": "牛奶燉蛋",
+        "route": "stove",
+        "ingredients": {"egg": 2, "milk": 1},
+        "spirit_restore": 25,
+        "stamina_restore": 180,
+    },
+    "silver_carp_steak": {
+        "name": "香煎銀鱗鯉",
+        "route": "stove",
+        "ingredients": {"silver_carp": 1, "wild_herb": 1},
+        "spirit_restore": 35,
+        "stamina_restore": 260,
+    },
+    "moon_trout_platter": {
+        "name": "月光鱒套餐",
+        "route": "stove",
+        "ingredients": {"moon_trout": 1, "moon_herb": 1},
+        "spirit_restore": 50,
+        "stamina_restore": 350,
+    },
+}
+
+
+POTION_CONFIG: dict[str, dict[str, Any]] = {
+    "stamina_potion": {
+        "name": "體力藥水",
         "stamina_restore": 250,
     },
 }
@@ -1311,6 +1384,35 @@ class TownLifeDatabase:
             "stamina": stamina,
             "max_stamina": int(row["max_stamina"]),
             "stamina_daily_remaining": stamina_daily_remaining,
+        }
+
+    def use_stamina_potion(self, user_id: int, item_key: str = "stamina_potion") -> dict[str, Any]:
+        potion = POTION_CONFIG.get(item_key)
+        if potion is None:
+            raise TownLifeError("這項物品不是可使用的體力藥水。")
+        with closing(self.connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._ensure_player(conn, user_id)
+            if self._inventory_quantity(conn, user_id, item_key) <= 0:
+                raise TownLifeError(f"背包裡沒有{item_name(item_key)}。")
+            player = self._refresh_stamina(conn, user_id)
+            current = int(player["stamina"])
+            maximum = int(player["max_stamina"])
+            if current >= maximum:
+                raise TownLifeError("目前體力已滿，先把藥水留著。")
+            restored = min(int(potion["stamina_restore"]), maximum - current)
+            now = now_iso()
+            conn.execute(
+                "UPDATE town_life_players SET stamina = ?, updated_at = ? WHERE user_id = ?",
+                (current + restored, now, str(user_id)),
+            )
+            self._change_inventory(conn, user_id, item_key, -1)
+            conn.commit()
+        return {
+            "item_key": item_key,
+            "stamina_restored": restored,
+            "stamina": current + restored,
+            "max_stamina": maximum,
         }
 
     def sell_items(self, user_id: int, category: str) -> dict[str, Any]:

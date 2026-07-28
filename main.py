@@ -2251,7 +2251,6 @@ class PlayerPanelSession:
                 embed=locked_operation_embed(
                     owner_name=self.owner_name,
                 ),
-                attachments=[],
                 view=None,
             )
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
@@ -2998,6 +2997,7 @@ TOWN_LIFE_ROUTE_IMAGES: dict[str, str] = {
     "ranch": "ranch.webp",
     "fishing": "fishing.webp",
     "crystal": "mining.webp",
+    "stove": "stove.webp",
 }
 
 TOWN_LIFE_ITEM_ASSET_ROOT = TOWN_LIFE_ASSET_ROOT / "items"
@@ -6174,6 +6174,42 @@ def workshop_embed(
         item_key or TOWN_LIFE_WORKSHOP_TOOLS[route_key],
     )
 
+def stove_embed(
+    user_id: int,
+    *,
+    notice: str = "",
+    item_key: str = "",
+) -> discord.Embed:
+    snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
+    player = snapshot["player"]
+    inventory = snapshot["inventory"]
+    recipe_lines: list[str] = []
+    for key, recipe in FOOD_RECIPE_CONFIG.items():
+        ingredients = {
+            str(mat_key): int(quantity)
+            for mat_key, quantity in dict(recipe["ingredients"]).items()
+        }
+        recipe_lines.append(
+            f"**{recipe['name']}**｜+{int(recipe.get('stamina_restore', 0))} 體／+{int(recipe['spirit_restore'])} 精\n"
+            f"材料：{format_item_requirements(ingredients)}｜持有×{int(inventory.get(key, 0))}"
+        )
+    description = (
+        f"**麻瓜幣**：{int(player['coins'])}\n"
+        f"**體力**：{int(player['stamina'])}／{int(player['max_stamina'])}\n"
+        f"**精神力**：{int(player['spirit'])}／{int(player['max_spirit'])}\n"
+        f"**體力藥水**：持有×{int(inventory.get('stamina_potion', 0))}｜商店價 250 麻瓜幣\n\n"
+        + "\n\n".join(recipe_lines)
+        + "\n\n料理完成後會放進背包，可直接在背包食用。"
+    )
+    if notice:
+        description = f"**本次結果**\n{notice}\n\n{description}"
+    embed = monk_embed("灶台料理", description, color=0xA86737)
+    return _town_life_embed_with_image(
+        _town_life_embed_with_item_thumbnail(embed, item_key),
+        "stove",
+    )
+
+
 def farm_embed(user_id: int, *, notice: str = "", item_key: str = "") -> discord.Embed:
     snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
     inventory = snapshot["inventory"]
@@ -6329,6 +6365,8 @@ def inventory_market_embed(
                 f"食用：+{stamina_restore} 體力／+{spirit_restore} 精神力"
                 "｜料理不可出售"
             )
+        elif selected_item_key == "stamina_potion":
+            selected_price = "使用：+250 體力｜藥水不可出售"
         else:
             selected_price = (
                 f"每份可售 {selected_sell} 麻瓜幣"
@@ -6466,6 +6504,18 @@ class TownLifeHubView(UserOwnedView):
             embed=mining_embed(self.owner_id),
             attachments=town_life_route_attachments("crystal"),
             view=CrystalRouteView(self.owner_id),
+        )
+
+    @discord.ui.button(label="灶台料理", style=discord.ButtonStyle.success, row=1)
+    async def stove_route(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=stove_embed(self.owner_id),
+            attachments=town_life_route_attachments("stove"),
+            view=StoveView(self.owner_id),
         )
 
     @discord.ui.button(label="工坊總覽", style=discord.ButtonStyle.secondary, row=1)
@@ -6988,6 +7038,80 @@ class CrystalRouteView(UserOwnedView):
         )
 
 
+class StoveCookSelect(discord.ui.Select):
+    def __init__(self, owner_id: int) -> None:
+        self.owner_id = int(owner_id)
+        options = [
+            discord.SelectOption(
+                label=str(recipe["name"]),
+                value=key,
+                description=f"+{int(recipe.get('stamina_restore', 0))} 體／+{int(recipe['spirit_restore'])} 精",
+            )
+            for key, recipe in FOOD_RECIPE_CONFIG.items()
+        ][:25]
+        super().__init__(
+            placeholder="選擇要料理的食物",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        recipe_key = self.values[0]
+        try:
+            result = TOWN_LIFE_DB.cook_food(self.owner_id, recipe_key)
+        except TownLifeError as exc:
+            await _town_life_send_error(interaction, exc)
+            return
+        notice = (
+            f"完成{item_name(recipe_key)}×{int(result['quantity'])}｜"
+            f"+{int(result.get('stamina_restore', 0))} 體／+{int(result['spirit_restore'])} 精"
+        )
+        await interaction.response.edit_message(
+            embed=stove_embed(self.owner_id, notice=notice, item_key=recipe_key),
+            attachments=town_life_display_attachments(route_key="stove", item_key=recipe_key),
+            view=StoveView(self.owner_id),
+        )
+
+
+class StoveView(UserOwnedView):
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(owner_id, timeout=900, add_home_button=False)
+        self.add_item(StoveCookSelect(owner_id))
+
+    @discord.ui.button(label="購買體力藥水", style=discord.ButtonStyle.primary, row=1)
+    async def buy_potion(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        try:
+            result = TOWN_LIFE_DB.buy_supply(self.owner_id, "stamina_potion", 1)
+        except TownLifeError as exc:
+            await _town_life_send_error(interaction, exc)
+            return
+        notice = f"購買體力藥水×1｜支付 {int(result['cost'])} 麻瓜幣"
+        await interaction.response.edit_message(
+            embed=stove_embed(self.owner_id, notice=notice, item_key="stamina_potion"),
+            attachments=town_life_display_attachments(route_key="stove", item_key="stamina_potion"),
+            view=StoveView(self.owner_id),
+        )
+
+    @discord.ui.button(label="背包與出售", style=discord.ButtonStyle.secondary, row=1)
+    async def inventory(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        selected_item_key = first_inventory_item_key(self.owner_id)
+        await interaction.response.edit_message(
+            embed=inventory_market_embed(self.owner_id, selected_item_key=selected_item_key),
+            attachments=town_life_item_attachments(selected_item_key),
+            view=InventoryMarketView(self.owner_id, selected_item_key=selected_item_key),
+        )
+
+    @discord.ui.button(label="返回生活職業", style=discord.ButtonStyle.secondary, row=2)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=town_life_home_embed(self.owner_id),
+            attachments=[],
+            view=TownLifeHubView(self.owner_id),
+        )
+
+
 class InventoryItemSelect(discord.ui.Select):
     def __init__(self, owner_id: int, selected_item_key: str = "") -> None:
         self.owner_id = int(owner_id)
@@ -7047,6 +7171,17 @@ class InventoryMarketView(UserOwnedView):
             )
             eat_button.callback = self._eat_selected
             self.add_item(eat_button)
+        elif (
+            self.selected_item_key == "stamina_potion"
+            and int(inventory.get(self.selected_item_key, 0)) > 0
+        ):
+            potion_button = discord.ui.Button(
+                label="使用一瓶體力藥水",
+                style=discord.ButtonStyle.success,
+                row=2,
+            )
+            potion_button.callback = self._use_potion
+            self.add_item(potion_button)
 
     async def _eat_selected(self, interaction: discord.Interaction) -> None:
         food_key = self.selected_item_key
@@ -7074,6 +7209,36 @@ class InventoryMarketView(UserOwnedView):
             f"+{int(result['spirit_restored'])} 精神力｜"
             f"目前體力 {int(result['stamina'])}／{int(result['max_stamina'])}，"
             f"精神力 {int(result['spirit'])}／{int(result['max_spirit'])}"
+        )
+        await interaction.response.edit_message(
+            embed=inventory_market_embed(
+                self.owner_id,
+                notice=notice,
+                selected_item_key=selected_item_key,
+            ),
+            attachments=town_life_item_attachments(selected_item_key),
+            view=InventoryMarketView(
+                self.owner_id,
+                selected_item_key=selected_item_key,
+            ),
+        )
+
+    async def _use_potion(self, interaction: discord.Interaction) -> None:
+        try:
+            result = TOWN_LIFE_DB.use_stamina_potion(self.owner_id, "stamina_potion")
+        except TownLifeError as exc:
+            await _town_life_send_error(interaction, exc)
+            return
+
+        inventory = TOWN_LIFE_DB.get_snapshot(self.owner_id)["inventory"]
+        selected_item_key = (
+            "stamina_potion"
+            if int(inventory.get("stamina_potion", 0)) > 0
+            else first_inventory_item_key(self.owner_id)
+        )
+        notice = (
+            f"使用體力藥水×1｜+{int(result['stamina_restored'])} 體力｜"
+            f"目前體力 {int(result['stamina'])}／{int(result['max_stamina'])}"
         )
         await interaction.response.edit_message(
             embed=inventory_market_embed(
@@ -7894,6 +8059,11 @@ async def open_player_panel_page(
     """Open a new player panel while keeping the previous message visible."""
     await interaction.response.defer(thinking=True)
 
+    try:
+        TOWN_LIFE_DB.get_snapshot(interaction.user.id)
+    except Exception:
+        logger.exception("城下町跨日重置檢查失敗：%s", interaction.user.id)
+
     previous_session = current_player_panel(interaction.user.id)
     if previous_session is not None:
         clear_player_panel_session(previous_session)
@@ -7959,6 +8129,16 @@ async def student_data_command(
         embed=embed,
         view=view,
     )
+
+
+@tree.command(
+    name="我的",
+    description="開啟我的主要操作面板，並同步檢查當日體力",
+)
+async def my_panel_command(
+    interaction: discord.Interaction,
+) -> None:
+    await student_data_command(interaction)
 
 
 @tree.command(
