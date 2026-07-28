@@ -8201,22 +8201,9 @@ async def open_player_panel_page(
     except Exception:
         logger.exception("城下町跨日重置檢查失敗：%s", interaction.user.id)
 
-    previous_session = current_player_panel(interaction.user.id)
-    if previous_session is not None:
-        clear_player_panel_session(previous_session)
-
-    # 保留上一張面板訊息，只移除舊按鈕，避免玩家重新輸入指令時
-    # 舊訊息被刪除；同時防止多張面板並行操作造成狀態衝突。
+    # 先記住舊面板，但不要立刻清除按鈕。
+    # 必須等新訊息建立完成並確認訊息 ID 不同，才能安全關閉舊面板。
     previous_message = await fetch_saved_player_panel(interaction.user.id)
-    if previous_message is not None:
-        try:
-            await previous_message.edit(view=None)
-        except (
-            discord.NotFound,
-            discord.Forbidden,
-            discord.HTTPException,
-        ):
-            pass
 
     message = await interaction.edit_original_response(
         embed=embed,
@@ -8224,6 +8211,7 @@ async def open_player_panel_page(
         view=view,
     )
 
+    # 先把新訊息登記為目前面板，避免舊面板清理流程誤傷新面板。
     ACADEMY_DB.save_player_panel(
         user_id=interaction.user.id,
         channel_id=message.channel.id,
@@ -8234,6 +8222,21 @@ async def open_player_panel_page(
         owner_name=interaction.user.display_name,
         message=message,
     )
+
+    # 舊訊息保留內容，只移除舊按鈕；若 Discord 回傳的是同一則訊息，絕不處理。
+    if (
+        previous_message is not None
+        and previous_message.id != message.id
+    ):
+        try:
+            await previous_message.edit(view=None)
+        except (
+            discord.NotFound,
+            discord.Forbidden,
+            discord.HTTPException,
+        ):
+            pass
+
     return message
 
 
