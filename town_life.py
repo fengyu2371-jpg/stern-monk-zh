@@ -18,6 +18,7 @@ INITIAL_STAMINA = 1000
 MAX_STAMINA = 1000
 INITIAL_SPIRIT = 100
 MAX_SPIRIT = 100
+MAX_DAILY_FOOD_STAMINA = 400
 
 
 class TownLifeError(RuntimeError):
@@ -212,30 +213,44 @@ ITEM_CONFIG: dict[str, dict[str, Any]] = {
 }
 
 
+UPGRADE_MATERIAL_KEYS = {
+    "branch",
+    "stone",
+    "copper_ore",
+    "iron_ore",
+    "raw_crystal",
+    "refined_crystal",
+}
+
+
 FOOD_RECIPE_CONFIG: dict[str, dict[str, Any]] = {
     "grilled_fish": {
         "name": "炭烤河魚",
         "route": "fishing",
         "ingredients": {"river_fish": 1, "branch": 1},
         "spirit_restore": 12,
+        "stamina_restore": 60,
     },
     "carrot_soup": {
         "name": "胡蘿蔔濃湯",
         "route": "farming",
         "ingredients": {"carrot": 2, "milk": 1},
         "spirit_restore": 25,
+        "stamina_restore": 100,
     },
     "farm_breakfast": {
         "name": "農家早餐",
         "route": "farming",
         "ingredients": {"wheat": 1, "egg": 2, "milk": 1},
         "spirit_restore": 40,
+        "stamina_restore": 180,
     },
     "moon_trout_steak": {
         "name": "香煎月光鱒",
         "route": "fishing",
         "ingredients": {"moon_trout": 1, "moon_herb": 1},
         "spirit_restore": 50,
+        "stamina_restore": 250,
     },
 }
 
@@ -321,6 +336,8 @@ class TownLifeDatabase:
                     max_spirit INTEGER NOT NULL DEFAULT 100,
                     stamina_updated_at TEXT NOT NULL,
                     last_rest_date TEXT NOT NULL DEFAULT '',
+                    food_stamina_date TEXT NOT NULL DEFAULT '',
+                    food_stamina_recovered INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -386,6 +403,14 @@ class TownLifeDatabase:
                 conn.execute(
                     f"ALTER TABLE town_life_players ADD COLUMN max_spirit INTEGER NOT NULL DEFAULT {MAX_SPIRIT}"
                 )
+            if "food_stamina_date" not in player_columns:
+                conn.execute(
+                    "ALTER TABLE town_life_players ADD COLUMN food_stamina_date TEXT NOT NULL DEFAULT ''"
+                )
+            if "food_stamina_recovered" not in player_columns:
+                conn.execute(
+                    "ALTER TABLE town_life_players ADD COLUMN food_stamina_recovered INTEGER NOT NULL DEFAULT 0"
+                )
 
             # 將舊版較低的體力上限安全提升到目前基礎上限。
             # 保留玩家已消耗的體力量，例如 70/100 會遷移成 970/1000。
@@ -409,8 +434,9 @@ class TownLifeDatabase:
             """
             INSERT OR IGNORE INTO town_life_players (
                 user_id, coins, stamina, max_stamina, spirit, max_spirit,
-                stamina_updated_at, last_rest_date, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+                stamina_updated_at, last_rest_date, food_stamina_date,
+                food_stamina_recovered, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, ?)
             """,
             (
                 uid,
@@ -1158,6 +1184,58 @@ class TownLifeDatabase:
             "spirit_cost": spirit_cost,
         }
 
+    def _next_upgrade_material_reserve(
+        self,
+        conn: sqlite3.Connection,
+        user_id: int,
+    ) -> dict[str, int]:
+        """保留三套工具各自下一級所需的升級素材。"""
+        uid = str(user_id)
+        reserve: dict[str, int] = {}
+        rows = conn.execute(
+            "SELECT tool_key, level FROM town_life_tools WHERE user_id = ?",
+            (uid,),
+        ).fetchall()
+        levels = {str(row["tool_key"]): int(row["level"]) for row in rows}
+        for tool_key, info in TOOL_CONFIG.items():
+            level = int(levels.get(tool_key, 0))
+            if level >= MAX_TOOL_LEVEL:
+                continue
+            materials = dict(info["materials"][level])
+            for item_key, quantity in materials.items():
+                key = str(item_key)
+                reserve[key] = reserve.get(key, 0) + int(quantity)
+        return reserve
+
+    def _restore_food_stamina(
+        self,
+        conn: sqlite3.Connection,
+        user_id: int,
+        requested: int,
+    ) -> tuple[int, int, int]:
+        player = self._refresh_stamina(conn, user_id)
+        uid = str(user_id)
+        today = today_key()
+        stored_date = str(player["food_stamina_date"] or "")
+        recovered_today = int(player["food_stamina_recovered"] or 0)
+        if stored_date != today:
+            recovered_today = 0
+        daily_remaining = max(0, MAX_DAILY_FOOD_STAMINA - recovered_today)
+        current = int(player["stamina"])
+        maximum = int(player["max_stamina"])
+        restored = min(max(0, int(requested)), daily_remaining, maximum - current)
+        now = now_iso()
+        conn.execute(
+            """
+            UPDATE town_life_players
+            SET stamina = ?, food_stamina_date = ?,
+                food_stamina_recovered = ?, updated_at = ?
+            WHERE user_id = ?
+            """,
+            (current + restored, today, recovered_today + restored, now, uid),
+        )
+        return restored, current + restored, daily_remaining - restored
+
     def cook_food(self, user_id: int, recipe_key: str) -> dict[str, Any]:
         recipe = FOOD_RECIPE_CONFIG.get(recipe_key)
         if recipe is None:
@@ -1187,6 +1265,7 @@ class TownLifeDatabase:
             "quantity": 1,
             "ingredients": ingredients,
             "spirit_restore": int(recipe["spirit_restore"]),
+            "stamina_restore": int(recipe.get("stamina_restore", 0)),
         }
 
     def eat_food(self, user_id: int, food_key: str) -> dict[str, Any]:
@@ -1198,18 +1277,40 @@ class TownLifeDatabase:
             self._ensure_player(conn, user_id)
             if self._inventory_quantity(conn, user_id, food_key) <= 0:
                 raise TownLifeError(f"背包裡沒有{item_name(food_key)}。")
-            restored = self._restore_spirit(conn, user_id, int(recipe["spirit_restore"]))
+
+            player = self._refresh_stamina(conn, user_id)
+            spirit_full = int(player["spirit"]) >= int(player["max_spirit"])
+            stamina_full = int(player["stamina"]) >= int(player["max_stamina"])
+            same_day = str(player["food_stamina_date"] or "") == today_key()
+            stamina_cap_full = (
+                same_day
+                and int(player["food_stamina_recovered"] or 0) >= MAX_DAILY_FOOD_STAMINA
+            )
+            if spirit_full and (stamina_full or stamina_cap_full):
+                raise TownLifeError("體力與精神力目前不需要再補充，先把料理留著。")
+
+            spirit_restored = self._restore_spirit(
+                conn, user_id, int(recipe["spirit_restore"])
+            )
+            stamina_restored, stamina, stamina_daily_remaining = self._restore_food_stamina(
+                conn, user_id, int(recipe.get("stamina_restore", 0))
+            )
             self._change_inventory(conn, user_id, food_key, -1)
             row = conn.execute(
-                "SELECT spirit, max_spirit FROM town_life_players WHERE user_id = ?",
+                "SELECT spirit, max_spirit, max_stamina FROM town_life_players WHERE user_id = ?",
                 (str(user_id),),
             ).fetchone()
             conn.commit()
         return {
             "food_key": food_key,
-            "restored": restored,
+            "restored": spirit_restored,
+            "spirit_restored": spirit_restored,
+            "stamina_restored": stamina_restored,
             "spirit": int(row["spirit"]),
             "max_spirit": int(row["max_spirit"]),
+            "stamina": stamina,
+            "max_stamina": int(row["max_stamina"]),
+            "stamina_daily_remaining": stamina_daily_remaining,
         }
 
     def sell_items(self, user_id: int, category: str) -> dict[str, Any]:
@@ -1218,6 +1319,7 @@ class TownLifeDatabase:
         with closing(self.connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._ensure_player(conn, user_id)
+            reserve = self._next_upgrade_material_reserve(conn, user_id)
             rows = conn.execute(
                 """
                 SELECT item_key, quantity FROM town_life_inventory
@@ -1226,6 +1328,7 @@ class TownLifeDatabase:
                 (str(user_id),),
             ).fetchall()
             sold: dict[str, int] = {}
+            protected: dict[str, int] = {}
             total = 0
             for row in rows:
                 key = str(row["item_key"])
@@ -1237,13 +1340,22 @@ class TownLifeDatabase:
                     continue
                 if category != "all" and item_category != category:
                     continue
-                total += sell_price * quantity
-                sold[key] = quantity
-                conn.execute(
-                    "DELETE FROM town_life_inventory WHERE user_id = ? AND item_key = ?",
-                    (str(user_id), key),
-                )
+
+                keep = min(quantity, int(reserve.get(key, 0))) if key in UPGRADE_MATERIAL_KEYS else 0
+                sell_quantity = max(0, quantity - keep)
+                if keep > 0:
+                    protected[key] = keep
+                if sell_quantity <= 0:
+                    continue
+
+                total += sell_price * sell_quantity
+                sold[key] = sell_quantity
+                self._change_inventory(conn, user_id, key, -sell_quantity)
             if total <= 0:
+                if protected:
+                    raise TownLifeError(
+                        "目前只有受保護的升級素材，系統已保留下一階段工具需求。"
+                    )
                 raise TownLifeError("這個分類目前沒有可出售的物資。")
             player = self._refresh_stamina(conn, user_id)
             coins = int(player["coins"])
@@ -1253,7 +1365,7 @@ class TownLifeDatabase:
                 (coins + total, now, str(user_id)),
             )
             conn.commit()
-        return {"sold": sold, "coins": total}
+        return {"sold": sold, "protected": protected, "coins": total}
 
     def daily_rest(self, user_id: int) -> dict[str, Any]:
         # 保留舊方法名稱，避免舊按鈕或舊部署在更新交界時發生屬性錯誤。

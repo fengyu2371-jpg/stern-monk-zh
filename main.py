@@ -2060,6 +2060,7 @@ from town_life import (
     ITEM_CONFIG,
     MINING_AREA_CONFIG,
     TOOL_CONFIG,
+    UPGRADE_MATERIAL_KEYS,
     TownLifeDatabase,
     TownLifeError,
     format_item_requirements,
@@ -6295,7 +6296,10 @@ def inventory_market_embed(
         if category not in category_lines:
             category = "other"
         sell_price = int(item.get("sell", 0))
-        price_text = f"｜單價 {sell_price}" if sell_price > 0 else "｜不可出售"
+        if key in UPGRADE_MATERIAL_KEYS:
+            price_text = f"｜單價 {sell_price}｜自動保留升級需求"
+        else:
+            price_text = f"｜單價 {sell_price}" if sell_price > 0 else "｜不可出售"
         category_lines[category].append(
             f"{item_name(key)}×{int(quantity)}{price_text}"
         )
@@ -6317,8 +6321,13 @@ def inventory_market_embed(
         selected = ITEM_CONFIG.get(selected_item_key, {})
         selected_sell = int(selected.get("sell", 0))
         if selected_item_key in FOOD_RECIPE_CONFIG:
-            restore = int(FOOD_RECIPE_CONFIG[selected_item_key]["spirit_restore"])
-            selected_price = f"食用一份可恢復 {restore} 精神力｜料理不可出售"
+            recipe = FOOD_RECIPE_CONFIG[selected_item_key]
+            spirit_restore = int(recipe["spirit_restore"])
+            stamina_restore = int(recipe.get("stamina_restore", 0))
+            selected_price = (
+                f"食用：+{stamina_restore} 體力／+{spirit_restore} 精神力"
+                "｜料理不可出售"
+            )
         else:
             selected_price = (
                 f"每份可售 {selected_sell} 麻瓜幣"
@@ -7059,8 +7068,11 @@ class InventoryMarketView(UserOwnedView):
             else first_inventory_item_key(self.owner_id)
         )
         notice = (
-            f"食用{item_name(food_key)}×1，恢復 {int(result['restored'])} 精神力；"
-            f"目前 {int(result['spirit'])}／{int(result['max_spirit'])}。"
+            f"食用{item_name(food_key)}×1｜"
+            f"+{int(result['stamina_restored'])} 體力／"
+            f"+{int(result['spirit_restored'])} 精神力｜"
+            f"目前體力 {int(result['stamina'])}／{int(result['max_stamina'])}，"
+            f"精神力 {int(result['spirit'])}／{int(result['max_spirit'])}"
         )
         await interaction.response.edit_message(
             embed=inventory_market_embed(
@@ -7085,7 +7097,17 @@ class InventoryMarketView(UserOwnedView):
             f"{item_name(key)}×{int(quantity)}"
             for key, quantity in result["sold"].items()
         )
-        notice = f"出售{label}：{sold_text}；獲得 {int(result['coins'])} 麻瓜幣。"
+        protected = result.get("protected", {})
+        protected_text = ""
+        if protected:
+            protected_text = "｜保留升級素材：" + "、".join(
+                f"{item_name(key)}×{int(quantity)}"
+                for key, quantity in protected.items()
+            )
+        notice = (
+            f"出售{label}：{sold_text}｜+{int(result['coins'])} 麻瓜幣"
+            f"{protected_text}"
+        )
         selected_item_key = first_inventory_item_key(self.owner_id)
         await interaction.response.edit_message(
             embed=inventory_market_embed(
@@ -7868,30 +7890,25 @@ async def open_player_panel_page(
     embed: discord.Embed,
     view: discord.ui.View,
 ) -> discord.InteractionMessage:
-    """Replace the player's previous interactive panel with a new page."""
+    """Open a new player panel while keeping the previous message visible."""
     await interaction.response.defer(thinking=True)
 
     previous_session = current_player_panel(interaction.user.id)
     if previous_session is not None:
         clear_player_panel_session(previous_session)
 
+    # 保留上一張面板訊息，只移除舊按鈕，避免玩家重新輸入指令時
+    # 舊訊息被刪除；同時防止多張面板並行操作造成狀態衝突。
     previous_message = await fetch_saved_player_panel(interaction.user.id)
     if previous_message is not None:
         try:
-            await previous_message.delete()
+            await previous_message.edit(view=None)
         except (
             discord.NotFound,
             discord.Forbidden,
             discord.HTTPException,
         ):
-            try:
-                await previous_message.edit(view=None)
-            except (
-                discord.NotFound,
-                discord.Forbidden,
-                discord.HTTPException,
-            ):
-                pass
+            pass
 
     message = await interaction.edit_original_response(
         embed=embed,
