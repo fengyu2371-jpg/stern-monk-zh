@@ -1,0 +1,122 @@
+{
+  "version": 2,
+  "icon_size": [
+    128,
+    128
+  ],
+  "style": "pixel-art dark-navy gold-frame",
+  "items": [
+    {
+      "filename": "farm_tools.png",
+      "name_zh_tw": "農具組"
+    },
+    {
+      "filename": "fishing_rod.png",
+      "name_zh_tw": "釣具組"
+    },
+    {
+      "filename": "pickaxe.png",
+      "name_zh_tw": "挖礦工具"
+    },
+    {
+      "filename": "wheat_seed.png",
+      "name_zh_tw": "小麥種子"
+    },
+    {
+      "filename": "carrot_seed.png",
+      "name_zh_tw": "胡蘿蔔種子"
+    },
+    {
+      "filename": "moon_herb_seed.png",
+      "name_zh_tw": "月光草種子"
+    },
+    {
+      "filename": "animal_feed.png",
+      "name_zh_tw": "飼料"
+    },
+    {
+      "filename": "wheat.png",
+      "name_zh_tw": "小麥"
+    },
+    {
+      "filename": "carrot.png",
+      "name_zh_tw": "胡蘿蔔"
+    },
+    {
+      "filename": "moon_herb.png",
+      "name_zh_tw": "月光草"
+    },
+    {
+      "filename": "egg.png",
+      "name_zh_tw": "雞蛋"
+    },
+    {
+      "filename": "milk.png",
+      "name_zh_tw": "牛奶"
+    },
+    {
+      "filename": "river_fish.png",
+      "name_zh_tw": "河魚"
+    },
+    {
+      "filename": "silver_carp.png",
+      "name_zh_tw": "銀鱗鯉"
+    },
+    {
+      "filename": "moon_trout.png",
+      "name_zh_tw": "月光鱒"
+    },
+    {
+      "filename": "old_boot.png",
+      "name_zh_tw": "泡水舊靴"
+    },
+    {
+      "filename": "wild_berry.png",
+      "name_zh_tw": "野莓"
+    },
+    {
+      "filename": "wild_herb.png",
+      "name_zh_tw": "野生藥草"
+    },
+    {
+      "filename": "branch.png",
+      "name_zh_tw": "硬木枝"
+    },
+    {
+      "filename": "stone.png",
+      "name_zh_tw": "石材"
+    },
+    {
+      "filename": "copper_ore.png",
+      "name_zh_tw": "銅礦"
+    },
+    {
+      "filename": "iron_ore.png",
+      "name_zh_tw": "鐵礦"
+    },
+    {
+      "filename": "raw_crystal.png",
+      "name_zh_tw": "魔法水晶原礦"
+    },
+    {
+      "filename": "refined_crystal.png",
+      "name_zh_tw": "精煉魔法水晶"
+    },
+    {
+      "filename": "grilled_fish.png",
+      "name_zh_tw": "炭烤河魚"
+    },
+    {
+      "filename": "carrot_soup.png",
+      "name_zh_tw": "胡蘿蔔濃湯"
+    },
+    {
+      "filename": "farm_breakfast.png",
+      "name_zh_tw": "農家早餐"
+    },
+    {
+      "filename": "moon_trout_steak.png",
+      "name_zh_tw": "香煎月光鱒"
+    }
+  ]
+}
