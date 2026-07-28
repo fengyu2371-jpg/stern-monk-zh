@@ -10,12 +10,14 @@ from zoneinfo import ZoneInfo
 
 
 TAIPEI_TIMEZONE = ZoneInfo("Asia/Taipei")
-STAMINA_REGEN_MINUTES = 10
+STAMINA_RESET_HOUR = 0
 MAX_TOOL_LEVEL = 5
 MAX_CAREER_LEVEL = 5
 INITIAL_COINS = 600
 INITIAL_STAMINA = 1000
 MAX_STAMINA = 1000
+INITIAL_SPIRIT = 100
+MAX_SPIRIT = 100
 
 
 class TownLifeError(RuntimeError):
@@ -26,20 +28,44 @@ TOOL_CONFIG: dict[str, dict[str, Any]] = {
     "farm_tools": {
         "name": "農具組",
         "route": "農牧師",
+        "workshop": "農牧工坊",
         "costs": [180, 450, 900, 1800, 3600],
+        "materials": [
+            {},
+            {"stone": 6, "copper_ore": 2},
+            {"branch": 8, "iron_ore": 3},
+            {"iron_ore": 6, "raw_crystal": 2},
+            {"iron_ore": 10, "refined_crystal": 2},
+        ],
         "description": "用於播種與收成；等級越高，農作物收成越多。",
     },
     "fishing_rod": {
         "name": "釣具組",
         "route": "漁採師",
+        "workshop": "河岸工坊",
         "costs": [220, 500, 1000, 2000, 4000],
+        "materials": [
+            {},
+            {"branch": 6, "copper_ore": 2},
+            {"branch": 10, "iron_ore": 3},
+            {"iron_ore": 5, "raw_crystal": 2},
+            {"iron_ore": 8, "refined_crystal": 2},
+        ],
         "description": "用於河岸釣魚；等級越高，稀有魚獲機率越高。",
     },
     "pickaxe": {
         "name": "挖礦工具",
         "route": "魔晶礦師",
+        "workshop": "礦坑工坊",
         "costs": [260, 600, 1200, 2400, 4800],
-        "description": "用於礦坑採掘；二級起有機會發現魔法水晶。",
+        "materials": [
+            {},
+            {"stone": 10, "copper_ore": 3},
+            {"copper_ore": 8, "iron_ore": 4},
+            {"iron_ore": 8, "raw_crystal": 2},
+            {"iron_ore": 12, "refined_crystal": 2},
+        ],
+        "description": "用於礦坑採掘；二級起可進入更深礦層。",
     },
 }
 
@@ -112,6 +138,46 @@ ANIMAL_CONFIG: dict[str, dict[str, Any]] = {
     },
 }
 
+MINING_AREA_CONFIG: dict[str, dict[str, Any]] = {
+    "outer_tunnel": {
+        "name": "外圍礦道",
+        "description": "礦層穩定，適合剛取得挖礦工具的礦師。以石材與銅礦為主。",
+        "required_tool_level": 1,
+        "required_career_level": 1,
+        "base_stamina_cost": 12,
+        "minimum_stamina_cost": 8,
+        "spirit_cost": 1,
+        "items": ["stone", "copper_ore", "iron_ore"],
+        "weights": [65, 30, 5],
+        "base_exp": 7,
+    },
+    "iron_depths": {
+        "name": "深層鐵脈",
+        "description": "岩層較硬，鐵礦密度更高，也可能找到少量魔法水晶原礦。",
+        "required_tool_level": 2,
+        "required_career_level": 2,
+        "base_stamina_cost": 18,
+        "minimum_stamina_cost": 14,
+        "spirit_cost": 2,
+        "items": ["stone", "copper_ore", "iron_ore", "raw_crystal"],
+        "weights": [20, 35, 35, 10],
+        "base_exp": 12,
+    },
+    "crystal_cavern": {
+        "name": "魔晶洞窟",
+        "description": "高級礦坑最深處，魔力濃度高，水晶原礦機率最高。",
+        "required_tool_level": 4,
+        "required_career_level": 3,
+        "base_stamina_cost": 28,
+        "minimum_stamina_cost": 22,
+        "spirit_cost": 4,
+        "items": ["copper_ore", "iron_ore", "raw_crystal"],
+        "weights": [15, 30, 55],
+        "base_exp": 20,
+    },
+}
+
+
 ITEM_CONFIG: dict[str, dict[str, Any]] = {
     # 商店物資
     "wheat_seed": {"name": "小麥種子", "buy": 10, "sell": 0, "category": "seed"},
@@ -138,6 +204,39 @@ ITEM_CONFIG: dict[str, dict[str, Any]] = {
     "iron_ore": {"name": "鐵礦", "sell": 120, "category": "crystal"},
     "raw_crystal": {"name": "魔法水晶原礦", "sell": 200, "category": "crystal"},
     "refined_crystal": {"name": "精煉魔法水晶", "sell": 560, "category": "crystal"},
+    # 料理（不可直接出售，用於恢復精神力）
+    "grilled_fish": {"name": "炭烤河魚", "sell": 0, "category": "food"},
+    "carrot_soup": {"name": "胡蘿蔔濃湯", "sell": 0, "category": "food"},
+    "farm_breakfast": {"name": "農家早餐", "sell": 0, "category": "food"},
+    "moon_trout_steak": {"name": "香煎月光鱒", "sell": 0, "category": "food"},
+}
+
+
+FOOD_RECIPE_CONFIG: dict[str, dict[str, Any]] = {
+    "grilled_fish": {
+        "name": "炭烤河魚",
+        "route": "fishing",
+        "ingredients": {"river_fish": 1, "branch": 1},
+        "spirit_restore": 12,
+    },
+    "carrot_soup": {
+        "name": "胡蘿蔔濃湯",
+        "route": "farming",
+        "ingredients": {"carrot": 2, "milk": 1},
+        "spirit_restore": 25,
+    },
+    "farm_breakfast": {
+        "name": "農家早餐",
+        "route": "farming",
+        "ingredients": {"wheat": 1, "egg": 2, "milk": 1},
+        "spirit_restore": 40,
+    },
+    "moon_trout_steak": {
+        "name": "香煎月光鱒",
+        "route": "fishing",
+        "ingredients": {"moon_trout": 1, "moon_herb": 1},
+        "spirit_restore": 50,
+    },
 }
 
 
@@ -176,6 +275,15 @@ def tool_name(tool_key: str) -> str:
     return str(TOOL_CONFIG.get(tool_key, {}).get("name") or tool_key)
 
 
+def format_item_requirements(requirements: dict[str, int]) -> str:
+    if not requirements:
+        return "不需要素材"
+    return "、".join(
+        f"{item_name(key)}×{int(quantity)}"
+        for key, quantity in requirements.items()
+    )
+
+
 def format_remaining(ready_at: str) -> str:
     remaining = parse_time(ready_at) - taipei_now()
     if remaining.total_seconds() <= 0:
@@ -209,6 +317,8 @@ class TownLifeDatabase:
                     coins INTEGER NOT NULL DEFAULT 600,
                     stamina INTEGER NOT NULL DEFAULT 1000,
                     max_stamina INTEGER NOT NULL DEFAULT 1000,
+                    spirit INTEGER NOT NULL DEFAULT 100,
+                    max_spirit INTEGER NOT NULL DEFAULT 100,
                     stamina_updated_at TEXT NOT NULL,
                     last_rest_date TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
@@ -263,6 +373,20 @@ class TownLifeDatabase:
                 """
             )
 
+            # 舊資料庫安全新增精神力欄位，不重建玩家資料表。
+            player_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(town_life_players)").fetchall()
+            }
+            if "spirit" not in player_columns:
+                conn.execute(
+                    f"ALTER TABLE town_life_players ADD COLUMN spirit INTEGER NOT NULL DEFAULT {INITIAL_SPIRIT}"
+                )
+            if "max_spirit" not in player_columns:
+                conn.execute(
+                    f"ALTER TABLE town_life_players ADD COLUMN max_spirit INTEGER NOT NULL DEFAULT {MAX_SPIRIT}"
+                )
+
             # 將舊版較低的體力上限安全提升到目前基礎上限。
             # 保留玩家已消耗的體力量，例如 70/100 會遷移成 970/1000。
             now = now_iso()
@@ -284,11 +408,21 @@ class TownLifeDatabase:
         conn.execute(
             """
             INSERT OR IGNORE INTO town_life_players (
-                user_id, coins, stamina, max_stamina, stamina_updated_at,
-                last_rest_date, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, '', ?, ?)
+                user_id, coins, stamina, max_stamina, spirit, max_spirit,
+                stamina_updated_at, last_rest_date, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?)
             """,
-            (uid, INITIAL_COINS, INITIAL_STAMINA, MAX_STAMINA, now, now, now),
+            (
+                uid,
+                INITIAL_COINS,
+                INITIAL_STAMINA,
+                MAX_STAMINA,
+                INITIAL_SPIRIT,
+                MAX_SPIRIT,
+                now,
+                now,
+                now,
+            ),
         )
         for tool_key in TOOL_CONFIG:
             conn.execute(
@@ -337,30 +471,20 @@ class TownLifeDatabase:
         if row is None:
             raise TownLifeError("找不到城下町生活資料。")
 
-        current = int(row["stamina"])
-        maximum = int(row["max_stamina"])
+        # 城下町體力採每日制：台北時間跨過凌晨 00:00 後，
+        # 玩家第一次開啟頁面或進行操作時，自動恢復到當前體力上限。
+        current_time = taipei_now()
         updated_at = parse_time(str(row["stamina_updated_at"]))
-        elapsed = taipei_now() - updated_at
-        recovered = max(0, int(elapsed.total_seconds() // (STAMINA_REGEN_MINUTES * 60)))
-        if recovered > 0:
-            now = now_iso()
-            if current >= maximum:
-                new_value = maximum
-                new_stamp = taipei_now()
-            else:
-                new_value = min(maximum, current + recovered)
-                if new_value >= maximum:
-                    new_stamp = taipei_now()
-                else:
-                    consumed_minutes = recovered * STAMINA_REGEN_MINUTES
-                    new_stamp = updated_at + timedelta(minutes=consumed_minutes)
+        if updated_at.date() < current_time.date():
+            maximum = int(row["max_stamina"])
+            now = current_time.isoformat(timespec="seconds")
             conn.execute(
                 """
                 UPDATE town_life_players
                 SET stamina = ?, stamina_updated_at = ?, updated_at = ?
                 WHERE user_id = ?
                 """,
-                (new_value, new_stamp.isoformat(timespec="seconds"), now, uid),
+                (maximum, now, now, uid),
             )
             row = conn.execute(
                 "SELECT * FROM town_life_players WHERE user_id = ?",
@@ -384,6 +508,51 @@ class TownLifeDatabase:
             (left, now, now, str(user_id)),
         )
         return left
+
+    def _spend_spirit(self, conn: sqlite3.Connection, user_id: int, amount: int) -> int:
+        self._ensure_player(conn, user_id)
+        row = conn.execute(
+            "SELECT spirit FROM town_life_players WHERE user_id = ?",
+            (str(user_id),),
+        ).fetchone()
+        spirit = int(row["spirit"] if row is not None else 0)
+        amount = max(0, int(amount))
+        if spirit < amount:
+            raise TownLifeError(
+                f"精神力不足。這次需要 {amount} 點，目前只有 {spirit} 點。"
+                "請到工坊料理並食用餐點。"
+            )
+        left = spirit - amount
+        now = now_iso()
+        conn.execute(
+            """
+            UPDATE town_life_players
+            SET spirit = ?, updated_at = ?
+            WHERE user_id = ?
+            """,
+            (left, now, str(user_id)),
+        )
+        return left
+
+    def _restore_spirit(self, conn: sqlite3.Connection, user_id: int, amount: int) -> int:
+        self._ensure_player(conn, user_id)
+        row = conn.execute(
+            "SELECT spirit, max_spirit FROM town_life_players WHERE user_id = ?",
+            (str(user_id),),
+        ).fetchone()
+        if row is None:
+            raise TownLifeError("找不到城下町生活資料。")
+        current = int(row["spirit"])
+        maximum = int(row["max_spirit"])
+        restored = min(maximum - current, max(0, int(amount)))
+        if restored <= 0:
+            raise TownLifeError("精神力已經全滿，不需要再吃料理。")
+        now = now_iso()
+        conn.execute(
+            "UPDATE town_life_players SET spirit = ?, updated_at = ? WHERE user_id = ?",
+            (current + restored, now, str(user_id)),
+        )
+        return restored
 
     @staticmethod
     def _inventory_quantity(conn: sqlite3.Connection, user_id: int, item_key: str) -> int:
@@ -543,11 +712,31 @@ class TownLifeDatabase:
             level = int(row["level"] if row is not None else 0)
             if level >= MAX_TOOL_LEVEL:
                 raise TownLifeError(f"{tool_name(tool_key)}已經升到最高等級。")
-            cost = int(TOOL_CONFIG[tool_key]["costs"][level])
+
+            info = TOOL_CONFIG[tool_key]
+            cost = int(info["costs"][level])
+            materials = {
+                str(key): int(quantity)
+                for key, quantity in dict(info["materials"][level]).items()
+            }
             player = self._refresh_stamina(conn, user_id)
             coins = int(player["coins"])
             if coins < cost:
-                raise TownLifeError(f"金幣不足。需要 {cost}，目前只有 {coins}。")
+                raise TownLifeError(f"麻瓜幣不足。需要 {cost}，目前只有 {coins}。")
+
+            missing = {
+                key: required - self._inventory_quantity(conn, user_id, key)
+                for key, required in materials.items()
+                if self._inventory_quantity(conn, user_id, key) < required
+            }
+            if missing:
+                raise TownLifeError(
+                    "升級素材不足，還缺：" + format_item_requirements(missing) + "。"
+                )
+
+            for item_key, quantity in materials.items():
+                self._change_inventory(conn, user_id, item_key, -quantity)
+
             new_level = level + 1
             now = now_iso()
             conn.execute(
@@ -562,7 +751,12 @@ class TownLifeDatabase:
                 (new_level, now, str(user_id), tool_key),
             )
             conn.commit()
-        return {"tool_key": tool_key, "level": new_level, "cost": cost}
+        return {
+            "tool_key": tool_key,
+            "level": new_level,
+            "cost": cost,
+            "materials": materials,
+        }
 
     def buy_supply(self, user_id: int, item_key: str, quantity: int) -> dict[str, Any]:
         item = ITEM_CONFIG.get(item_key)
@@ -575,7 +769,7 @@ class TownLifeDatabase:
             player = self._refresh_stamina(conn, user_id)
             coins = int(player["coins"])
             if coins < total:
-                raise TownLifeError(f"金幣不足。需要 {total}，目前只有 {coins}。")
+                raise TownLifeError(f"麻瓜幣不足。需要 {total}，目前只有 {coins}。")
             self._change_inventory(conn, user_id, item_key, quantity)
             now = now_iso()
             conn.execute(
@@ -598,7 +792,7 @@ class TownLifeDatabase:
             ).fetchone()
             tool_level = int(tool_row["level"] if tool_row is not None else 0)
             if tool_level <= 0:
-                raise TownLifeError("要先到工具商店購買農具組，才能播種。")
+                raise TownLifeError("要先到對應工坊購買農具組，才能播種。")
 
             empty_plots = conn.execute(
                 """
@@ -616,6 +810,8 @@ class TownLifeDatabase:
                 raise TownLifeError(f"沒有{item_name(seed_key)}，先去購買種子。")
             stamina_cost = plant_count * max(1, 4 - ((tool_level - 1) // 2))
             self._spend_stamina(conn, user_id, stamina_cost)
+            spirit_cost = max(1, plant_count)
+            self._spend_spirit(conn, user_id, spirit_cost)
             started = taipei_now()
             ready = started + timedelta(minutes=int(crop["growth_minutes"]))
             for plot in empty_plots[:plant_count]:
@@ -640,6 +836,7 @@ class TownLifeDatabase:
             "planted": plant_count,
             "ready_at": ready.isoformat(timespec="seconds"),
             "stamina_cost": stamina_cost,
+            "spirit_cost": spirit_cost,
         }
 
     def harvest_ready_crops(self, user_id: int) -> dict[str, Any]:
@@ -663,7 +860,10 @@ class TownLifeDatabase:
             ready_rows = [row for row in rows if parse_time(str(row["ready_at"])) <= taipei_now()]
             if not ready_rows:
                 raise TownLifeError("目前沒有成熟的作物。")
-            self._spend_stamina(conn, user_id, max(1, len(ready_rows) * 2))
+            stamina_cost = max(1, len(ready_rows) * 2)
+            spirit_cost = max(1, len(ready_rows))
+            self._spend_stamina(conn, user_id, stamina_cost)
+            self._spend_spirit(conn, user_id, spirit_cost)
             rewards: dict[str, int] = {}
             exp_gain = 0
             for row in ready_rows:
@@ -684,7 +884,14 @@ class TownLifeDatabase:
                 )
             level, exp = self._add_career_exp(conn, user_id, "farming", exp_gain)
             conn.commit()
-        return {"rewards": rewards, "exp_gain": exp_gain, "level": level, "exp": exp}
+        return {
+            "rewards": rewards,
+            "exp_gain": exp_gain,
+            "level": level,
+            "exp": exp,
+            "stamina_cost": stamina_cost,
+            "spirit_cost": spirit_cost,
+        }
 
     def buy_animal(self, user_id: int, animal_key: str) -> dict[str, Any]:
         animal = ANIMAL_CONFIG.get(animal_key)
@@ -705,7 +912,7 @@ class TownLifeDatabase:
             coins = int(player["coins"])
             cost = int(animal["cost"])
             if coins < cost:
-                raise TownLifeError(f"金幣不足。購買{animal['name']}需要 {cost}。")
+                raise TownLifeError(f"麻瓜幣不足。購買{animal['name']}需要 {cost}。")
             current_row = conn.execute(
                 """
                 SELECT quantity FROM town_life_animals
@@ -757,6 +964,8 @@ class TownLifeDatabase:
                 raise TownLifeError(
                     f"需要 {quantity} 份飼料才能照顧全部{animal['name']}，目前只有 {feed_qty} 份。"
                 )
+            spirit_cost = max(1, min(5, quantity))
+            self._spend_spirit(conn, user_id, spirit_cost)
             self._change_inventory(conn, user_id, "animal_feed", -quantity)
             self._change_inventory(conn, user_id, str(animal["product"]), quantity)
             exp_gain = int(animal["career_exp"]) * quantity
@@ -778,6 +987,7 @@ class TownLifeDatabase:
             "exp_gain": exp_gain,
             "level": level,
             "exp": exp,
+            "spirit_cost": spirit_cost,
         }
 
     def forage(self, user_id: int) -> dict[str, Any]:
@@ -785,6 +995,8 @@ class TownLifeDatabase:
             conn.execute("BEGIN IMMEDIATE")
             self._ensure_player(conn, user_id)
             self._spend_stamina(conn, user_id, 6)
+            spirit_cost = 1
+            self._spend_spirit(conn, user_id, spirit_cost)
             item_key = random.choices(
                 ["wild_berry", "wild_herb", "branch"],
                 weights=[50, 30, 20],
@@ -794,7 +1006,14 @@ class TownLifeDatabase:
             self._change_inventory(conn, user_id, item_key, quantity)
             level, exp = self._add_career_exp(conn, user_id, "fishing", 5)
             conn.commit()
-        return {"item_key": item_key, "quantity": quantity, "level": level, "exp": exp}
+        return {
+            "item_key": item_key,
+            "quantity": quantity,
+            "level": level,
+            "exp": exp,
+            "stamina_cost": 6,
+            "spirit_cost": spirit_cost,
+        }
 
     def fish(self, user_id: int) -> dict[str, Any]:
         with closing(self.connect()) as conn:
@@ -806,9 +1025,11 @@ class TownLifeDatabase:
             ).fetchone()
             tool_level = int(tool_row["level"] if tool_row is not None else 0)
             if tool_level <= 0:
-                raise TownLifeError("要先到工具商店購買釣具組。")
+                raise TownLifeError("要先到對應工坊購買釣具組。")
             stamina_cost = max(5, 10 - tool_level)
             self._spend_stamina(conn, user_id, stamina_cost)
+            spirit_cost = 2
+            self._spend_spirit(conn, user_id, spirit_cost)
             if tool_level == 1:
                 items, weights = ["river_fish", "silver_carp", "old_boot"], [72, 18, 10]
             elif tool_level == 2:
@@ -825,11 +1046,16 @@ class TownLifeDatabase:
             "item_key": item_key,
             "quantity": quantity,
             "stamina_cost": stamina_cost,
+            "spirit_cost": spirit_cost,
             "level": level,
             "exp": exp,
         }
 
-    def mine(self, user_id: int) -> dict[str, Any]:
+    def mine(self, user_id: int, area_key: str = "outer_tunnel") -> dict[str, Any]:
+        area = MINING_AREA_CONFIG.get(area_key)
+        if area is None:
+            raise TownLifeError("找不到這個礦區。")
+
         with closing(self.connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._ensure_player(conn, user_id)
@@ -837,30 +1063,63 @@ class TownLifeDatabase:
                 "SELECT level FROM town_life_tools WHERE user_id = ? AND tool_key = 'pickaxe'",
                 (str(user_id),),
             ).fetchone()
+            career_row = conn.execute(
+                """
+                SELECT level FROM town_life_careers
+                WHERE user_id = ? AND career_key = 'crystal'
+                """,
+                (str(user_id),),
+            ).fetchone()
             tool_level = int(tool_row["level"] if tool_row is not None else 0)
+            career_level = int(career_row["level"] if career_row is not None else 1)
+            required_tool = int(area["required_tool_level"])
+            required_career = int(area["required_career_level"])
+
             if tool_level <= 0:
-                raise TownLifeError("要先到工具商店購買挖礦工具。")
-            stamina_cost = max(6, 12 - tool_level)
+                raise TownLifeError("要先到對應工坊購買挖礦工具。")
+            if tool_level < required_tool or career_level < required_career:
+                raise TownLifeError(
+                    f"{area['name']}需要挖礦工具 Lv.{required_tool}，"
+                    f"並且魔晶礦師達到 Lv.{required_career}。"
+                )
+
+            efficiency = max(0, tool_level - required_tool)
+            stamina_cost = max(
+                int(area["minimum_stamina_cost"]),
+                int(area["base_stamina_cost"]) - efficiency,
+            )
             self._spend_stamina(conn, user_id, stamina_cost)
-            items = ["stone", "copper_ore", "iron_ore"]
-            weights = [60, 30, 10]
-            if tool_level >= 2:
-                items.append("raw_crystal")
-                weights.append(4 + tool_level * 3)
+            spirit_cost = int(area["spirit_cost"])
+            self._spend_spirit(conn, user_id, spirit_cost)
+
+            items = list(area["items"])
+            weights = list(area["weights"])
             item_key = random.choices(items, weights=weights, k=1)[0]
             quantity = 1
             if item_key == "stone":
                 quantity += random.randint(0, max(1, tool_level // 2))
-            elif tool_level >= 4 and random.random() < 0.2:
-                quantity += 1
+            elif item_key in {"copper_ore", "iron_ore"} and tool_level >= 4:
+                if random.random() < 0.25:
+                    quantity += 1
+            elif item_key == "raw_crystal" and tool_level >= 5:
+                if random.random() < 0.15:
+                    quantity += 1
+
             self._change_inventory(conn, user_id, item_key, quantity)
-            exp_gain = 15 if item_key == "raw_crystal" else (10 if item_key == "iron_ore" else 7)
+            exp_gain = int(area["base_exp"])
+            if item_key == "iron_ore":
+                exp_gain += 2
+            elif item_key == "raw_crystal":
+                exp_gain += 5
             level, exp = self._add_career_exp(conn, user_id, "crystal", exp_gain)
             conn.commit()
         return {
+            "area_key": area_key,
+            "area_name": str(area["name"]),
             "item_key": item_key,
             "quantity": quantity,
             "stamina_cost": stamina_cost,
+            "spirit_cost": spirit_cost,
             "level": level,
             "exp": exp,
         }
@@ -884,12 +1143,74 @@ class TownLifeDatabase:
             if self._inventory_quantity(conn, user_id, "iron_ore") < 1:
                 raise TownLifeError("精煉還需要 1 個鐵礦作為穩定材料。")
             self._spend_stamina(conn, user_id, 8)
+            spirit_cost = 3
+            self._spend_spirit(conn, user_id, spirit_cost)
             self._change_inventory(conn, user_id, "raw_crystal", -2)
             self._change_inventory(conn, user_id, "iron_ore", -1)
             self._change_inventory(conn, user_id, "refined_crystal", 1)
             level, exp = self._add_career_exp(conn, user_id, "crystal", 25)
             conn.commit()
-        return {"quantity": 1, "level": level, "exp": exp}
+        return {
+            "quantity": 1,
+            "level": level,
+            "exp": exp,
+            "stamina_cost": 8,
+            "spirit_cost": spirit_cost,
+        }
+
+    def cook_food(self, user_id: int, recipe_key: str) -> dict[str, Any]:
+        recipe = FOOD_RECIPE_CONFIG.get(recipe_key)
+        if recipe is None:
+            raise TownLifeError("找不到這道料理。")
+        ingredients = {
+            str(key): int(quantity)
+            for key, quantity in dict(recipe["ingredients"]).items()
+        }
+        with closing(self.connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._ensure_player(conn, user_id)
+            missing = {
+                key: required - self._inventory_quantity(conn, user_id, key)
+                for key, required in ingredients.items()
+                if self._inventory_quantity(conn, user_id, key) < required
+            }
+            if missing:
+                raise TownLifeError(
+                    "料理材料不足，還缺：" + format_item_requirements(missing) + "。"
+                )
+            for item_key, quantity in ingredients.items():
+                self._change_inventory(conn, user_id, item_key, -quantity)
+            self._change_inventory(conn, user_id, recipe_key, 1)
+            conn.commit()
+        return {
+            "recipe_key": recipe_key,
+            "quantity": 1,
+            "ingredients": ingredients,
+            "spirit_restore": int(recipe["spirit_restore"]),
+        }
+
+    def eat_food(self, user_id: int, food_key: str) -> dict[str, Any]:
+        recipe = FOOD_RECIPE_CONFIG.get(food_key)
+        if recipe is None:
+            raise TownLifeError("這項物品不是可以食用的料理。")
+        with closing(self.connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._ensure_player(conn, user_id)
+            if self._inventory_quantity(conn, user_id, food_key) <= 0:
+                raise TownLifeError(f"背包裡沒有{item_name(food_key)}。")
+            restored = self._restore_spirit(conn, user_id, int(recipe["spirit_restore"]))
+            self._change_inventory(conn, user_id, food_key, -1)
+            row = conn.execute(
+                "SELECT spirit, max_spirit FROM town_life_players WHERE user_id = ?",
+                (str(user_id),),
+            ).fetchone()
+            conn.commit()
+        return {
+            "food_key": food_key,
+            "restored": restored,
+            "spirit": int(row["spirit"]),
+            "max_spirit": int(row["max_spirit"]),
+        }
 
     def sell_items(self, user_id: int, category: str) -> dict[str, Any]:
         if category not in {"farming", "fishing", "crystal", "all"}:
@@ -935,24 +1256,13 @@ class TownLifeDatabase:
         return {"sold": sold, "coins": total}
 
     def daily_rest(self, user_id: int) -> dict[str, Any]:
+        # 保留舊方法名稱，避免舊按鈕或舊部署在更新交界時發生屬性錯誤。
+        # 新版已改成每日凌晨 00:00 自動重置，不再提供額外休息回體。
         with closing(self.connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             player = self._refresh_stamina(conn, user_id)
-            if str(player["last_rest_date"]) == today_key():
-                raise TownLifeError("今天已經休息過一次。體力仍會每 10 分鐘自然回復 1 點。")
-            current = int(player["stamina"])
-            maximum = int(player["max_stamina"])
-            recovered = min(40, maximum - current)
-            if recovered <= 0:
-                raise TownLifeError("目前體力已滿，不需要消耗今天的休息次數。")
-            now = now_iso()
-            conn.execute(
-                """
-                UPDATE town_life_players
-                SET stamina = ?, stamina_updated_at = ?, last_rest_date = ?, updated_at = ?
-                WHERE user_id = ?
-                """,
-                (current + recovered, now, today_key(), now, str(user_id)),
-            )
             conn.commit()
-        return {"recovered": recovered, "stamina": current + recovered}
+        raise TownLifeError(
+            f"目前體力為 {int(player['stamina'])}／{int(player['max_stamina'])}。"
+            "城下町體力會在每天凌晨 00:00 自動重置。"
+        )
