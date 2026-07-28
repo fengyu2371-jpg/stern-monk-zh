@@ -6395,6 +6395,28 @@ def _inventory_selected_attachments(selected_item_key: str) -> list[discord.File
     return town_life_item_attachments(selected_item_key) if selected_item_key else []
 
 
+def _inventory_initial_state(
+    user_id: int,
+    preferred_category: str = "farming",
+) -> tuple[str, str]:
+    """Return a category and selected item that always refer to the same page."""
+    category = (
+        preferred_category
+        if preferred_category in INVENTORY_CATEGORY_LABELS
+        else "farming"
+    )
+    keys = _inventory_keys(user_id, category)
+    if not keys:
+        for candidate in INVENTORY_CATEGORY_LABELS:
+            candidate_keys = _inventory_keys(user_id, candidate)
+            if candidate_keys:
+                category = candidate
+                keys = candidate_keys
+                break
+    selected_item_key = keys[0] if keys else ""
+    return category, selected_item_key
+
+
 def inventory_market_embed(
     user_id: int,
     *,
@@ -6613,11 +6635,19 @@ class TownLifeHubView(UserOwnedView):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        selected_item_key = first_inventory_item_key(self.owner_id)
+        category, selected_item_key = _inventory_initial_state(self.owner_id)
         await interaction.response.edit_message(
-            embed=inventory_market_embed(self.owner_id, selected_item_key=selected_item_key),
+            embed=inventory_market_embed(
+                self.owner_id,
+                selected_item_key=selected_item_key,
+                category=category,
+            ),
             attachments=_inventory_selected_attachments(selected_item_key),
-            view=InventoryMarketView(self.owner_id, selected_item_key=selected_item_key),
+            view=InventoryMarketView(
+                self.owner_id,
+                selected_item_key=selected_item_key,
+                category=category,
+            ),
         )
 
     @discord.ui.button(label="休息片刻", style=discord.ButtonStyle.success, row=2)
@@ -7052,11 +7082,19 @@ class FishingRouteView(UserOwnedView):
 
     @discord.ui.button(label="背包與出售", style=discord.ButtonStyle.secondary, row=2)
     async def market(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        selected_item_key = first_inventory_item_key(self.owner_id)
+        category, selected_item_key = _inventory_initial_state(self.owner_id)
         await interaction.response.edit_message(
-            embed=inventory_market_embed(self.owner_id, selected_item_key=selected_item_key),
+            embed=inventory_market_embed(
+                self.owner_id,
+                selected_item_key=selected_item_key,
+                category=category,
+            ),
             attachments=_inventory_selected_attachments(selected_item_key),
-            view=InventoryMarketView(self.owner_id, selected_item_key=selected_item_key),
+            view=InventoryMarketView(
+                self.owner_id,
+                selected_item_key=selected_item_key,
+                category=category,
+            ),
         )
 
     @discord.ui.button(label="返回生活職業", style=discord.ButtonStyle.secondary, row=2)
@@ -7122,11 +7160,19 @@ class CrystalRouteView(UserOwnedView):
 
     @discord.ui.button(label="背包與出售", style=discord.ButtonStyle.secondary, row=1)
     async def market(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        selected_item_key = first_inventory_item_key(self.owner_id)
+        category, selected_item_key = _inventory_initial_state(self.owner_id)
         await interaction.response.edit_message(
-            embed=inventory_market_embed(self.owner_id, selected_item_key=selected_item_key),
+            embed=inventory_market_embed(
+                self.owner_id,
+                selected_item_key=selected_item_key,
+                category=category,
+            ),
             attachments=_inventory_selected_attachments(selected_item_key),
-            view=InventoryMarketView(self.owner_id, selected_item_key=selected_item_key),
+            view=InventoryMarketView(
+                self.owner_id,
+                selected_item_key=selected_item_key,
+                category=category,
+            ),
         )
 
     @discord.ui.button(label="返回生活職業", style=discord.ButtonStyle.secondary, row=2)
@@ -7289,16 +7335,18 @@ class StoveView(UserOwnedView):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        selected_item_key = first_inventory_item_key(self.owner_id)
+        category, selected_item_key = _inventory_initial_state(self.owner_id)
         await interaction.response.edit_message(
             embed=inventory_market_embed(
                 self.owner_id,
                 selected_item_key=selected_item_key,
+                category=category,
             ),
             attachments=_inventory_selected_attachments(selected_item_key),
             view=InventoryMarketView(
                 self.owner_id,
                 selected_item_key=selected_item_key,
+                category=category,
             ),
         )
 
