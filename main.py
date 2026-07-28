@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# stern-monk-zh-tw v28 district-guide deploy
+# stern-monk-zh-tw v29 town-life professions deploy
 # 主要程式碼集中於本檔；data/ 僅保存教學與台詞資料。
 
 
@@ -2052,6 +2052,19 @@ import discord
 from discord import app_commands
 from openai import AsyncOpenAI
 
+from town_life import (
+    ANIMAL_CONFIG,
+    CAREER_CONFIG,
+    CROP_CONFIG,
+    ITEM_CONFIG,
+    TOOL_CONFIG,
+    TownLifeDatabase,
+    TownLifeError,
+    format_remaining,
+    item_name,
+    tool_name,
+)
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 SETTINGS = Settings.from_env()
@@ -2096,6 +2109,7 @@ KNOWLEDGE = KnowledgeBase.from_files(
     DATA_DIR / "faq_zh_tw.json",
 )
 ACADEMY_DB = AcademyDatabase(SETTINGS.monk_db_path)
+TOWN_LIFE_DB = TownLifeDatabase(SETTINGS.monk_db_path)
 
 openai_client: AsyncOpenAI | None = None
 if SETTINGS.ai_available:
@@ -2861,7 +2875,8 @@ class MonkClient(discord.Client):
 
     async def setup_hook(self) -> None:
         ACADEMY_DB.initialize()
-        logger.info("修士學籍資料庫已初始化：%s", SETTINGS.monk_db_path)
+        TOWN_LIFE_DB.initialize()
+        logger.info("修士學籍與城下町生活資料庫已初始化：%s", SETTINGS.monk_db_path)
 
         # 玩家功能改由 /學生資料 開啟，不再註冊公共入口。
         # 舊版已貼出的固定面板不會在重啟後恢復操作。
@@ -3041,7 +3056,7 @@ def town_hub_render() -> tuple[discord.Embed, discord.File | None]:
     info = DISTRICT_GUIDE[DISTRICT_OVERVIEW_KEY]
     embed = monk_embed(
         "🏘️ 禊月堂魔法學院城下町",
-        "依區域尋找公開店鋪、查看校外住處，或管理自己的店鋪與住所。",
+        "可以進行種田、釣魚、採集、畜牧與魔晶採礦，也能依區域尋找公開店鋪、查看住處。",
         color=0x8B6F47,
     )
 
@@ -5896,6 +5911,685 @@ class DistrictBrowserView(UserOwnedView):
             view=TownHubView(self.owner_id),
         )
 
+def _town_life_tool_text(snapshot: dict[str, Any]) -> str:
+    tools = snapshot["tools"]
+    return "｜".join(
+        f"{tool_name(key)} Lv.{int(tools.get(key, 0))}"
+        for key in ("farm_tools", "fishing_rod", "pickaxe")
+    )
+
+
+def _town_life_career_text(snapshot: dict[str, Any]) -> str:
+    careers = snapshot["careers"]
+    return "\n".join(
+        f"**{info['name']} Lv.{int(careers.get(key, {}).get('level', 1))}**"
+        f"｜經驗 {int(careers.get(key, {}).get('exp', 0))}"
+        for key, info in CAREER_CONFIG.items()
+    )
+
+
+def town_life_home_embed(
+    user_id: int,
+    *,
+    notice: str = "",
+) -> discord.Embed:
+    snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
+    player = snapshot["player"]
+    inventory_total = sum(int(value) for value in snapshot["inventory"].values())
+    description = (
+        "城下町的生活職業以生產、採集與工具成長為核心。"
+        "三條路線可以同時發展，不需要永久鎖定職業。\n\n"
+        f"**金幣**：{int(player['coins'])}\n"
+        f"**體力**：{int(player['stamina'])}／{int(player['max_stamina'])}"
+        "（每 10 分鐘回復 1）\n"
+        f"**物資總數**：{inventory_total}\n"
+        f"**工具**：{_town_life_tool_text(snapshot)}"
+    )
+    if notice:
+        description = f"**本次結果**\n{notice}\n\n{description}"
+    embed = monk_embed(
+        "城下町生活職業",
+        description,
+        color=0x6B8E5E,
+    )
+    embed.add_field(
+        name="三條職業路線",
+        value=_town_life_career_text(snapshot),
+        inline=False,
+    )
+    embed.add_field(
+        name="起步方式",
+        value=(
+            "初始有 600 金幣。先到工具商店購買想發展的工具；"
+            "沒有工具時仍可前往河岸採集，慢慢累積資金。"
+        ),
+        inline=False,
+    )
+    return embed
+
+
+def tool_shop_embed(user_id: int, *, notice: str = "") -> discord.Embed:
+    snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
+    player = snapshot["player"]
+    lines: list[str] = []
+    for key, info in TOOL_CONFIG.items():
+        level = int(snapshot["tools"].get(key, 0))
+        if level >= 5:
+            next_text = "已達最高等級"
+        else:
+            cost = int(info["costs"][level])
+            action = "購買" if level == 0 else f"升至 Lv.{level + 1}"
+            next_text = f"{action}需要 {cost} 金幣"
+        lines.append(
+            f"**{info['name']} Lv.{level}｜{info['route']}**\n"
+            f"{info['description']}\n{next_text}"
+        )
+    description = f"目前金幣：**{int(player['coins'])}**\n\n" + "\n\n".join(lines)
+    if notice:
+        description = f"**本次結果**\n{notice}\n\n{description}"
+    return monk_embed("工匠街｜工具商店", description, color=0x8A6F47)
+
+
+def farm_embed(user_id: int, *, notice: str = "") -> discord.Embed:
+    snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
+    inventory = snapshot["inventory"]
+    plots: list[str] = []
+    for plot in snapshot["plots"]:
+        crop_key = str(plot["crop_key"])
+        if not crop_key:
+            status = "空地"
+        else:
+            crop_name = str(CROP_CONFIG[crop_key]["name"])
+            status = f"{crop_name}｜{format_remaining(str(plot['ready_at']))}"
+        plots.append(f"田地 {int(plot['plot_no'])}：{status}")
+    seed_text = "｜".join(
+        f"{ITEM_CONFIG[str(info['seed'])]['name']}×{int(inventory.get(str(info['seed']), 0))}"
+        for info in CROP_CONFIG.values()
+    )
+    description = (
+        f"**農具組**：Lv.{int(snapshot['tools'].get('farm_tools', 0))}\n"
+        f"**體力**：{int(snapshot['player']['stamina'])}／{int(snapshot['player']['max_stamina'])}\n"
+        f"**種子**：{seed_text}\n\n"
+        + "\n".join(plots)
+        + "\n\n播種會自動填滿可用空地，最多三塊；成熟後可一次收成。"
+    )
+    if notice:
+        description = f"**本次結果**\n{notice}\n\n{description}"
+    return monk_embed("農牧師｜三塊農田", description, color=0x76965A)
+
+
+def ranch_embed(user_id: int, *, notice: str = "") -> discord.Embed:
+    snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
+    animals = snapshot["animals"]
+    inventory = snapshot["inventory"]
+    chicken = animals.get("chicken", {"quantity": 0, "last_collect_date": ""})
+    cow = animals.get("cow", {"quantity": 0, "last_collect_date": ""})
+    description = (
+        f"**雞**：{int(chicken['quantity'])} 隻｜價格 {ANIMAL_CONFIG['chicken']['cost']}\n"
+        f"**牛**：{int(cow['quantity'])} 隻｜價格 {ANIMAL_CONFIG['cow']['cost']}\n"
+        f"**飼料**：{int(inventory.get('animal_feed', 0))} 份\n"
+        f"**金幣**：{int(snapshot['player']['coins'])}\n\n"
+        "雞需要農具組 Lv.1，牛需要農具組 Lv.2。"
+        "每隻動物每天消耗一份飼料，並可採收一份雞蛋或牛奶。"
+    )
+    if notice:
+        description = f"**本次結果**\n{notice}\n\n{description}"
+    return monk_embed("農牧師｜畜牧場", description, color=0xA07B4F)
+
+
+def fishing_embed(user_id: int, *, notice: str = "") -> discord.Embed:
+    snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
+    career = snapshot["careers"].get("fishing", {"level": 1, "exp": 0})
+    description = (
+        f"**漁採師**：Lv.{int(career['level'])}｜經驗 {int(career['exp'])}\n"
+        f"**釣具組**：Lv.{int(snapshot['tools'].get('fishing_rod', 0))}\n"
+        f"**體力**：{int(snapshot['player']['stamina'])}／{int(snapshot['player']['max_stamina'])}\n\n"
+        "釣魚需要釣具組；工具越好，越容易釣到銀鱗鯉與月光鱒。\n"
+        "河岸採集不需要工具，可取得野莓、藥草與硬木枝，也是新玩家的起步收入。"
+    )
+    if notice:
+        description = f"**本次結果**\n{notice}\n\n{description}"
+    return monk_embed("漁採師｜河岸與野外", description, color=0x4F7F91)
+
+
+def mining_embed(user_id: int, *, notice: str = "") -> discord.Embed:
+    snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
+    career = snapshot["careers"].get("crystal", {"level": 1, "exp": 0})
+    inventory = snapshot["inventory"]
+    description = (
+        f"**魔晶礦師**：Lv.{int(career['level'])}｜經驗 {int(career['exp'])}\n"
+        f"**挖礦工具**：Lv.{int(snapshot['tools'].get('pickaxe', 0))}\n"
+        f"**體力**：{int(snapshot['player']['stamina'])}／{int(snapshot['player']['max_stamina'])}\n"
+        f"**魔法水晶原礦**：{int(inventory.get('raw_crystal', 0))}\n"
+        f"**鐵礦**：{int(inventory.get('iron_ore', 0))}\n\n"
+        "挖礦工具 Lv.2 起可能挖出魔法水晶原礦。"
+        "魔晶礦師 Lv.2 後，可用 2 個原礦與 1 個鐵礦精煉成高價魔法水晶。"
+    )
+    if notice:
+        description = f"**本次結果**\n{notice}\n\n{description}"
+    return monk_embed("魔晶礦師｜礦坑與精煉", description, color=0x765A91)
+
+
+def inventory_market_embed(user_id: int, *, notice: str = "") -> discord.Embed:
+    snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
+    inventory = snapshot["inventory"]
+    category_lines: dict[str, list[str]] = {
+        "farming": [],
+        "fishing": [],
+        "crystal": [],
+        "other": [],
+    }
+    for key, quantity in inventory.items():
+        item = ITEM_CONFIG.get(key, {})
+        category = str(item.get("category", "other"))
+        if category not in category_lines:
+            category = "other"
+        sell_price = int(item.get("sell", 0))
+        price_text = f"｜單價 {sell_price}" if sell_price > 0 else "｜不可出售"
+        category_lines[category].append(
+            f"{item_name(key)}×{int(quantity)}{price_text}"
+        )
+    labels = {
+        "farming": "農牧物資",
+        "fishing": "漁獲與採集",
+        "crystal": "礦物與魔晶",
+        "other": "種子與補給",
+    }
+    lines = [f"**金幣**：{int(snapshot['player']['coins'])}"]
+    for category in ("farming", "fishing", "crystal", "other"):
+        values = category_lines[category]
+        lines.append(f"\n**{labels[category]}**\n" + ("\n".join(values) if values else "目前沒有"))
+    description = "\n".join(lines)
+    if notice:
+        description = f"**本次結果**\n{notice}\n\n{description}"
+    return monk_embed("河岸市集｜物資背包與出售", description, color=0x8C744B)
+
+
+async def _town_life_send_error(
+    interaction: discord.Interaction,
+    error: TownLifeError,
+) -> None:
+    await interaction.response.send_message(str(error), ephemeral=True)
+
+
+class SeedPurchaseSelect(discord.ui.Select):
+    def __init__(self, owner_id: int) -> None:
+        self.owner_id = int(owner_id)
+        options = [
+            discord.SelectOption(
+                label=f"購買 {info['name']}種子 ×5",
+                value=str(info["seed"]),
+                description=f"共 {int(ITEM_CONFIG[str(info['seed'])]['buy']) * 5} 金幣",
+            )
+            for info in CROP_CONFIG.values()
+        ]
+        super().__init__(
+            placeholder="購買五包種子",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        item_key = self.values[0]
+        try:
+            result = TOWN_LIFE_DB.buy_supply(self.owner_id, item_key, 5)
+        except TownLifeError as exc:
+            await _town_life_send_error(interaction, exc)
+            return
+        notice = f"購買 {item_name(item_key)}×5，支付 {int(result['cost'])} 金幣。"
+        await interaction.response.edit_message(
+            embed=farm_embed(self.owner_id, notice=notice),
+            attachments=[],
+            view=FarmRouteView(self.owner_id),
+        )
+
+
+class CropPlantSelect(discord.ui.Select):
+    def __init__(self, owner_id: int) -> None:
+        self.owner_id = int(owner_id)
+        options = [
+            discord.SelectOption(
+                label=f"種植{info['name']}",
+                value=key,
+                description=f"成熟時間 {int(info['growth_minutes'])} 分鐘；自動填滿空地",
+            )
+            for key, info in CROP_CONFIG.items()
+        ]
+        super().__init__(
+            placeholder="選擇要播種的作物",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        crop_key = self.values[0]
+        try:
+            result = TOWN_LIFE_DB.plant_crop(self.owner_id, crop_key)
+        except TownLifeError as exc:
+            await _town_life_send_error(interaction, exc)
+            return
+        crop_name = str(CROP_CONFIG[crop_key]["name"])
+        notice = (
+            f"已在 {int(result['planted'])} 塊空地種下{crop_name}，"
+            f"消耗 {int(result['stamina_cost'])} 體力。"
+        )
+        await interaction.response.edit_message(
+            embed=farm_embed(self.owner_id, notice=notice),
+            attachments=[],
+            view=FarmRouteView(self.owner_id),
+        )
+
+
+class TownLifeHubView(UserOwnedView):
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(owner_id, timeout=900)
+
+    @discord.ui.button(label="農牧師", style=discord.ButtonStyle.success, row=0)
+    async def farming_route(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=farm_embed(self.owner_id),
+            attachments=[],
+            view=FarmRouteView(self.owner_id),
+        )
+
+    @discord.ui.button(label="漁採師", style=discord.ButtonStyle.primary, row=0)
+    async def fishing_route(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=fishing_embed(self.owner_id),
+            attachments=[],
+            view=FishingRouteView(self.owner_id),
+        )
+
+    @discord.ui.button(label="魔晶礦師", style=discord.ButtonStyle.primary, row=0)
+    async def crystal_route(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=mining_embed(self.owner_id),
+            attachments=[],
+            view=CrystalRouteView(self.owner_id),
+        )
+
+    @discord.ui.button(label="工具商店", style=discord.ButtonStyle.secondary, row=1)
+    async def tool_shop(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=tool_shop_embed(self.owner_id),
+            attachments=[],
+            view=ToolShopView(self.owner_id),
+        )
+
+    @discord.ui.button(label="背包與出售", style=discord.ButtonStyle.secondary, row=1)
+    async def inventory_market(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=inventory_market_embed(self.owner_id),
+            attachments=[],
+            view=InventoryMarketView(self.owner_id),
+        )
+
+    @discord.ui.button(label="每日休息", style=discord.ButtonStyle.secondary, row=2)
+    async def daily_rest(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        try:
+            result = TOWN_LIFE_DB.daily_rest(self.owner_id)
+        except TownLifeError as exc:
+            await _town_life_send_error(interaction, exc)
+            return
+        notice = f"休息後回復 {int(result['recovered'])} 體力，目前為 {int(result['stamina'])}。"
+        await interaction.response.edit_message(
+            embed=town_life_home_embed(self.owner_id, notice=notice),
+            attachments=[],
+            view=TownLifeHubView(self.owner_id),
+        )
+
+    @discord.ui.button(label="返回城下町", style=discord.ButtonStyle.secondary, row=2)
+    async def back_to_town(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        embed, file = town_hub_render()
+        attachments = [file] if file is not None else []
+        await interaction.response.edit_message(
+            embed=embed,
+            attachments=attachments,
+            view=TownHubView(self.owner_id),
+        )
+
+
+class ToolShopView(UserOwnedView):
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(owner_id, timeout=900)
+
+    async def _upgrade(self, interaction: discord.Interaction, tool_key: str) -> None:
+        try:
+            result = TOWN_LIFE_DB.buy_or_upgrade_tool(self.owner_id, tool_key)
+        except TownLifeError as exc:
+            await _town_life_send_error(interaction, exc)
+            return
+        action = "購買" if int(result["level"]) == 1 else "升級"
+        notice = (
+            f"已{action}{tool_name(tool_key)}至 Lv.{int(result['level'])}，"
+            f"支付 {int(result['cost'])} 金幣。"
+        )
+        await interaction.response.edit_message(
+            embed=tool_shop_embed(self.owner_id, notice=notice),
+            attachments=[],
+            view=ToolShopView(self.owner_id),
+        )
+
+    @discord.ui.button(label="購買／升級農具", style=discord.ButtonStyle.success, row=0)
+    async def farm_tool(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._upgrade(interaction, "farm_tools")
+
+    @discord.ui.button(label="購買／升級釣具", style=discord.ButtonStyle.primary, row=0)
+    async def fishing_tool(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._upgrade(interaction, "fishing_rod")
+
+    @discord.ui.button(label="購買／升級礦具", style=discord.ButtonStyle.primary, row=0)
+    async def mining_tool(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._upgrade(interaction, "pickaxe")
+
+    @discord.ui.button(label="返回生活職業", style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=town_life_home_embed(self.owner_id),
+            attachments=[],
+            view=TownLifeHubView(self.owner_id),
+        )
+
+
+class FarmRouteView(UserOwnedView):
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(owner_id, timeout=900)
+        self.add_item(SeedPurchaseSelect(owner_id))
+        self.add_item(CropPlantSelect(owner_id))
+
+    @discord.ui.button(label="收成成熟作物", style=discord.ButtonStyle.success, row=2)
+    async def harvest(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        try:
+            result = TOWN_LIFE_DB.harvest_ready_crops(self.owner_id)
+        except TownLifeError as exc:
+            await _town_life_send_error(interaction, exc)
+            return
+        rewards = "、".join(
+            f"{item_name(key)}×{int(quantity)}"
+            for key, quantity in result["rewards"].items()
+        )
+        notice = f"收成完成：{rewards}；農牧經驗 +{int(result['exp_gain'])}。"
+        await interaction.response.edit_message(
+            embed=farm_embed(self.owner_id, notice=notice),
+            attachments=[],
+            view=FarmRouteView(self.owner_id),
+        )
+
+    @discord.ui.button(label="前往畜牧場", style=discord.ButtonStyle.primary, row=2)
+    async def ranch(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=ranch_embed(self.owner_id),
+            attachments=[],
+            view=RanchView(self.owner_id),
+        )
+
+    @discord.ui.button(label="返回生活職業", style=discord.ButtonStyle.secondary, row=3)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=town_life_home_embed(self.owner_id),
+            attachments=[],
+            view=TownLifeHubView(self.owner_id),
+        )
+
+
+class RanchView(UserOwnedView):
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(owner_id, timeout=900)
+
+    async def _buy_animal(self, interaction: discord.Interaction, animal_key: str) -> None:
+        try:
+            result = TOWN_LIFE_DB.buy_animal(self.owner_id, animal_key)
+        except TownLifeError as exc:
+            await _town_life_send_error(interaction, exc)
+            return
+        animal = ANIMAL_CONFIG[animal_key]
+        notice = (
+            f"購買 1 隻{animal['name']}，支付 {int(result['cost'])} 金幣；"
+            f"目前共 {int(result['quantity'])} 隻。"
+        )
+        await interaction.response.edit_message(
+            embed=ranch_embed(self.owner_id, notice=notice),
+            attachments=[],
+            view=RanchView(self.owner_id),
+        )
+
+    async def _collect(self, interaction: discord.Interaction, animal_key: str) -> None:
+        try:
+            result = TOWN_LIFE_DB.collect_animal_product(self.owner_id, animal_key)
+        except TownLifeError as exc:
+            await _town_life_send_error(interaction, exc)
+            return
+        notice = (
+            f"採收 {item_name(str(result['product']))}×{int(result['quantity'])}，"
+            f"農牧經驗 +{int(result['exp_gain'])}。"
+        )
+        await interaction.response.edit_message(
+            embed=ranch_embed(self.owner_id, notice=notice),
+            attachments=[],
+            view=RanchView(self.owner_id),
+        )
+
+    @discord.ui.button(label="購買雞", style=discord.ButtonStyle.success, row=0)
+    async def buy_chicken(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._buy_animal(interaction, "chicken")
+
+    @discord.ui.button(label="購買牛", style=discord.ButtonStyle.success, row=0)
+    async def buy_cow(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._buy_animal(interaction, "cow")
+
+    @discord.ui.button(label="購買飼料 ×10", style=discord.ButtonStyle.secondary, row=1)
+    async def buy_feed(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        try:
+            result = TOWN_LIFE_DB.buy_supply(self.owner_id, "animal_feed", 10)
+        except TownLifeError as exc:
+            await _town_life_send_error(interaction, exc)
+            return
+        notice = f"購買飼料×10，支付 {int(result['cost'])} 金幣。"
+        await interaction.response.edit_message(
+            embed=ranch_embed(self.owner_id, notice=notice),
+            attachments=[],
+            view=RanchView(self.owner_id),
+        )
+
+    @discord.ui.button(label="收雞蛋", style=discord.ButtonStyle.primary, row=1)
+    async def collect_eggs(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._collect(interaction, "chicken")
+
+    @discord.ui.button(label="擠牛奶", style=discord.ButtonStyle.primary, row=1)
+    async def collect_milk(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._collect(interaction, "cow")
+
+    @discord.ui.button(label="返回農田", style=discord.ButtonStyle.secondary, row=2)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=farm_embed(self.owner_id),
+            attachments=[],
+            view=FarmRouteView(self.owner_id),
+        )
+
+
+class FishingRouteView(UserOwnedView):
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(owner_id, timeout=900)
+
+    @discord.ui.button(label="河岸釣魚", style=discord.ButtonStyle.primary, row=0)
+    async def fish(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        try:
+            result = TOWN_LIFE_DB.fish(self.owner_id)
+        except TownLifeError as exc:
+            await _town_life_send_error(interaction, exc)
+            return
+        notice = (
+            f"釣到 {item_name(str(result['item_key']))}×{int(result['quantity'])}，"
+            f"消耗 {int(result['stamina_cost'])} 體力。"
+        )
+        await interaction.response.edit_message(
+            embed=fishing_embed(self.owner_id, notice=notice),
+            attachments=[],
+            view=FishingRouteView(self.owner_id),
+        )
+
+    @discord.ui.button(label="野外採集", style=discord.ButtonStyle.success, row=0)
+    async def forage(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        try:
+            result = TOWN_LIFE_DB.forage(self.owner_id)
+        except TownLifeError as exc:
+            await _town_life_send_error(interaction, exc)
+            return
+        notice = f"採集到 {item_name(str(result['item_key']))}×{int(result['quantity'])}，消耗 6 體力。"
+        await interaction.response.edit_message(
+            embed=fishing_embed(self.owner_id, notice=notice),
+            attachments=[],
+            view=FishingRouteView(self.owner_id),
+        )
+
+    @discord.ui.button(label="背包與出售", style=discord.ButtonStyle.secondary, row=1)
+    async def market(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=inventory_market_embed(self.owner_id),
+            attachments=[],
+            view=InventoryMarketView(self.owner_id),
+        )
+
+    @discord.ui.button(label="返回生活職業", style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=town_life_home_embed(self.owner_id),
+            attachments=[],
+            view=TownLifeHubView(self.owner_id),
+        )
+
+
+class CrystalRouteView(UserOwnedView):
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(owner_id, timeout=900)
+
+    @discord.ui.button(label="進入礦坑", style=discord.ButtonStyle.primary, row=0)
+    async def mine(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        try:
+            result = TOWN_LIFE_DB.mine(self.owner_id)
+        except TownLifeError as exc:
+            await _town_life_send_error(interaction, exc)
+            return
+        notice = (
+            f"挖到 {item_name(str(result['item_key']))}×{int(result['quantity'])}，"
+            f"消耗 {int(result['stamina_cost'])} 體力。"
+        )
+        await interaction.response.edit_message(
+            embed=mining_embed(self.owner_id, notice=notice),
+            attachments=[],
+            view=CrystalRouteView(self.owner_id),
+        )
+
+    @discord.ui.button(label="精煉魔法水晶", style=discord.ButtonStyle.success, row=0)
+    async def refine(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        try:
+            TOWN_LIFE_DB.refine_crystal(self.owner_id)
+        except TownLifeError as exc:
+            await _town_life_send_error(interaction, exc)
+            return
+        notice = "消耗 2 個魔法水晶原礦與 1 個鐵礦，完成 1 個精煉魔法水晶。"
+        await interaction.response.edit_message(
+            embed=mining_embed(self.owner_id, notice=notice),
+            attachments=[],
+            view=CrystalRouteView(self.owner_id),
+        )
+
+    @discord.ui.button(label="背包與出售", style=discord.ButtonStyle.secondary, row=1)
+    async def market(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=inventory_market_embed(self.owner_id),
+            attachments=[],
+            view=InventoryMarketView(self.owner_id),
+        )
+
+    @discord.ui.button(label="返回生活職業", style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=town_life_home_embed(self.owner_id),
+            attachments=[],
+            view=TownLifeHubView(self.owner_id),
+        )
+
+
+class InventoryMarketView(UserOwnedView):
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(owner_id, timeout=900)
+
+    async def _sell(self, interaction: discord.Interaction, category: str, label: str) -> None:
+        try:
+            result = TOWN_LIFE_DB.sell_items(self.owner_id, category)
+        except TownLifeError as exc:
+            await _town_life_send_error(interaction, exc)
+            return
+        sold_text = "、".join(
+            f"{item_name(key)}×{int(quantity)}"
+            for key, quantity in result["sold"].items()
+        )
+        notice = f"出售{label}：{sold_text}；獲得 {int(result['coins'])} 金幣。"
+        await interaction.response.edit_message(
+            embed=inventory_market_embed(self.owner_id, notice=notice),
+            attachments=[],
+            view=InventoryMarketView(self.owner_id),
+        )
+
+    @discord.ui.button(label="出售農牧物資", style=discord.ButtonStyle.success, row=0)
+    async def sell_farming(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._sell(interaction, "farming", "農牧物資")
+
+    @discord.ui.button(label="出售漁採物資", style=discord.ButtonStyle.primary, row=0)
+    async def sell_fishing(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._sell(interaction, "fishing", "漁採物資")
+
+    @discord.ui.button(label="出售礦晶物資", style=discord.ButtonStyle.primary, row=0)
+    async def sell_crystal(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._sell(interaction, "crystal", "礦晶物資")
+
+    @discord.ui.button(label="出售全部可售物資", style=discord.ButtonStyle.danger, row=1)
+    async def sell_all(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._sell(interaction, "all", "全部可售物資")
+
+    @discord.ui.button(label="返回生活職業", style=discord.ButtonStyle.secondary, row=2)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=town_life_home_embed(self.owner_id),
+            attachments=[],
+            view=TownLifeHubView(self.owner_id),
+        )
+
+
 
 class TownHubView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
@@ -5945,6 +6639,22 @@ class TownHubView(UserOwnedView):
             embed=embed,
             attachments=attachments,
             view=view,
+        )
+
+    @discord.ui.button(
+        label="生活職業",
+        style=discord.ButtonStyle.success,
+        row=0,
+    )
+    async def town_life(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=town_life_home_embed(self.owner_id),
+            attachments=[],
+            view=TownLifeHubView(self.owner_id),
         )
 
     @discord.ui.button(
