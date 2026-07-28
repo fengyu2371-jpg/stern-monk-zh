@@ -2060,6 +2060,7 @@ from town_life import (
     ITEM_CONFIG,
     MINING_AREA_CONFIG,
     TOOL_CONFIG,
+    TOOL_UPGRADE_SPIRIT_COSTS,
     UPGRADE_MATERIAL_KEYS,
     TownLifeDatabase,
     TownLifeError,
@@ -6433,8 +6434,8 @@ def inventory_market_embed(
     if notice:
         description = f"**本次結果**\n{notice}\n\n{description}"
     embed = monk_embed("河岸市集｜分類背包", description, color=0x8C744B)
-    embed.set_footer(text="切換分類或翻頁後，再選擇要查看的物品。")
-    return _town_life_embed_with_item_thumbnail(embed, selected_item_key)
+    embed.set_footer(text="切換分類或翻頁後，再選擇要查看的物品。道具圖片請按「詳細說明」查看。")
+    return embed
 
 
 async def _town_life_send_error(
@@ -6591,7 +6592,7 @@ class TownLifeHubView(UserOwnedView):
         selected_item_key = first_inventory_item_key(self.owner_id)
         await interaction.response.edit_message(
             embed=inventory_market_embed(self.owner_id, selected_item_key=selected_item_key),
-            attachments=town_life_item_attachments(selected_item_key),
+            attachments=[],
             view=InventoryMarketView(self.owner_id, selected_item_key=selected_item_key),
         )
 
@@ -7030,7 +7031,7 @@ class FishingRouteView(UserOwnedView):
         selected_item_key = first_inventory_item_key(self.owner_id)
         await interaction.response.edit_message(
             embed=inventory_market_embed(self.owner_id, selected_item_key=selected_item_key),
-            attachments=town_life_item_attachments(selected_item_key),
+            attachments=[],
             view=InventoryMarketView(self.owner_id, selected_item_key=selected_item_key),
         )
 
@@ -7100,7 +7101,7 @@ class CrystalRouteView(UserOwnedView):
         selected_item_key = first_inventory_item_key(self.owner_id)
         await interaction.response.edit_message(
             embed=inventory_market_embed(self.owner_id, selected_item_key=selected_item_key),
-            attachments=town_life_item_attachments(selected_item_key),
+            attachments=[],
             view=InventoryMarketView(self.owner_id, selected_item_key=selected_item_key),
         )
 
@@ -7270,7 +7271,7 @@ class StoveView(UserOwnedView):
                 self.owner_id,
                 selected_item_key=selected_item_key,
             ),
-            attachments=town_life_item_attachments(selected_item_key),
+            attachments=[],
             view=InventoryMarketView(
                 self.owner_id,
                 selected_item_key=selected_item_key,
@@ -7324,7 +7325,7 @@ class InventoryCategorySelect(discord.ui.Select):
                 category=category,
                 page=0,
             ),
-            attachments=town_life_item_attachments(selected),
+            attachments=[],
             view=InventoryMarketView(
                 self.owner_id,
                 selected_item_key=selected,
@@ -7375,7 +7376,7 @@ class InventoryItemSelect(discord.ui.Select):
                 category=self.category,
                 page=self.page,
             ),
-            attachments=town_life_item_attachments(selected),
+            attachments=[],
             view=InventoryMarketView(
                 self.owner_id,
                 selected_item_key=selected,
@@ -7442,7 +7443,7 @@ class InventoryMarketView(UserOwnedView):
                 category=self.category,
                 page=page,
             ),
-            attachments=town_life_item_attachments(selected),
+            attachments=[],
             view=InventoryMarketView(
                 self.owner_id,
                 selected_item_key=selected,
@@ -7488,7 +7489,25 @@ class InventoryMarketView(UserOwnedView):
             lines.append(f"販售：{'每份 ' + str(price) + ' 麻瓜幣' if price > 0 else '不可出售'}")
             if key in UPGRADE_MATERIAL_KEYS:
                 lines.append("保護：系統會先保留三套工具下一級所需數量，只出售多出的部分。")
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+        detail_embed = monk_embed(
+            f"{item_name(key)}｜詳細說明",
+            "\n".join(lines[1:]),
+            color=0x8C744B,
+        )
+        filename = f"{key}.png"
+        asset_path = TOWN_LIFE_ITEM_ASSET_ROOT / filename
+        if asset_path.is_file():
+            detail_embed.set_thumbnail(url=f"attachment://{filename}")
+            await interaction.response.send_message(
+                embed=detail_embed,
+                file=discord.File(asset_path, filename=filename),
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                embed=detail_embed,
+                ephemeral=True,
+            )
 
     async def _eat_selected(self, interaction: discord.Interaction) -> None:
         key = self.selected_item_key
