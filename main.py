@@ -6323,7 +6323,15 @@ def inventory_market_embed(
     if selected_item_key and int(inventory.get(selected_item_key, 0)) > 0:
         selected = ITEM_CONFIG.get(selected_item_key, {})
         selected_sell = int(selected.get("sell", 0))
-        selected_price = f"每份可售 {selected_sell} 麻瓜幣" if selected_sell > 0 else "此道具不可出售"
+        if selected_item_key in FOOD_RECIPE_CONFIG:
+            restore = int(FOOD_RECIPE_CONFIG[selected_item_key]["spirit_restore"])
+            selected_price = f"食用一份可恢復 {restore} 精神力｜料理不可出售"
+        else:
+            selected_price = (
+                f"每份可售 {selected_sell} 麻瓜幣"
+                if selected_sell > 0
+                else "此道具不可出售"
+            )
         lines.insert(
             2,
             f"\n**目前查看：{item_name(selected_item_key)}**\n"
@@ -7000,7 +7008,7 @@ class InventoryItemSelect(discord.ui.Select):
             for key in item_keys
         ]
         super().__init__(
-            placeholder="選擇道具查看圖片",
+            placeholder="選擇道具查看、出售或食用",
             min_values=1,
             max_values=1,
             options=options,
@@ -7024,8 +7032,58 @@ class InventoryMarketView(UserOwnedView):
         super().__init__(owner_id, timeout=900)
         self.selected_item_key = selected_item_key or first_inventory_item_key(owner_id)
         snapshot = TOWN_LIFE_DB.get_snapshot(owner_id)
-        if any(int(quantity) > 0 for quantity in snapshot["inventory"].values()):
+        inventory = snapshot["inventory"]
+        if any(int(quantity) > 0 for quantity in inventory.values()):
             self.add_item(InventoryItemSelect(owner_id, self.selected_item_key))
+
+        if (
+            self.selected_item_key in FOOD_RECIPE_CONFIG
+            and int(inventory.get(self.selected_item_key, 0)) > 0
+        ):
+            eat_button = discord.ui.Button(
+                label=f"食用一份 {item_name(self.selected_item_key)}",
+                style=discord.ButtonStyle.success,
+                row=2,
+            )
+            eat_button.callback = self._eat_selected
+            self.add_item(eat_button)
+
+    async def _eat_selected(self, interaction: discord.Interaction) -> None:
+        food_key = self.selected_item_key
+        if food_key not in FOOD_RECIPE_CONFIG:
+            await _town_life_send_error(
+                interaction,
+                TownLifeError("請先從背包選擇一份料理。"),
+            )
+            return
+        try:
+            result = TOWN_LIFE_DB.eat_food(self.owner_id, food_key)
+        except TownLifeError as exc:
+            await _town_life_send_error(interaction, exc)
+            return
+
+        inventory = TOWN_LIFE_DB.get_snapshot(self.owner_id)["inventory"]
+        selected_item_key = (
+            food_key
+            if int(inventory.get(food_key, 0)) > 0
+            else first_inventory_item_key(self.owner_id)
+        )
+        notice = (
+            f"食用{item_name(food_key)}×1，恢復 {int(result['restored'])} 精神力；"
+            f"目前 {int(result['spirit'])}／{int(result['max_spirit'])}。"
+        )
+        await interaction.response.edit_message(
+            embed=inventory_market_embed(
+                self.owner_id,
+                notice=notice,
+                selected_item_key=selected_item_key,
+            ),
+            attachments=town_life_item_attachments(selected_item_key),
+            view=InventoryMarketView(
+                self.owner_id,
+                selected_item_key=selected_item_key,
+            ),
+        )
 
     async def _sell(self, interaction: discord.Interaction, category: str, label: str) -> None:
         try:
