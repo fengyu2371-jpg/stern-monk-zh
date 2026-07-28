@@ -6229,15 +6229,14 @@ def fishing_embed(user_id: int, *, notice: str = "", item_key: str = "") -> disc
     snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
     career = snapshot["careers"].get("fishing", {"level": 1, "exp": 0})
     description = (
-        f"**漁採師**：Lv.{int(career['level'])}｜經驗 {int(career['exp'])}\n"
-        f"**釣具組**：Lv.{int(snapshot['tools'].get('fishing_rod', 0))}\n"
-        f"**體力**：{int(snapshot['player']['stamina'])}／{int(snapshot['player']['max_stamina'])}\n"
-        f"**精神力**：{int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}\n\n"
-        "釣魚需要釣具組；工具越好，越容易釣到銀鱗鯉與月光鱒。\n"
-        "河岸採集不需要工具，可取得野莓、藥草與硬木枝，也是新玩家的起步收入。"
+        f"**漁採師 Lv.{int(career['level'])}**｜經驗 {int(career['exp'])}｜"
+        f"釣具 Lv.{int(snapshot['tools'].get('fishing_rod', 0))}\n"
+        f"**體力** {int(snapshot['player']['stamina'])}／{int(snapshot['player']['max_stamina'])}｜"
+        f"**精神力** {int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}\n\n"
+        "釣魚需要釣具；野外採集不需要工具。"
     )
     if notice:
-        description = f"**本次結果**\n{notice}\n\n{description}"
+        description = f"**本次結果**｜{notice}\n\n{description}"
     embed = monk_embed("漁採師｜河岸與野外", description, color=0x4F7F91)
     embed = _town_life_embed_with_image(embed, "fishing")
     return _town_life_embed_with_item_thumbnail(embed, item_key)
@@ -6255,25 +6254,19 @@ def mining_embed(user_id: int, *, notice: str = "", item_key: str = "") -> disco
         required_tool = int(area["required_tool_level"])
         required_career = int(area["required_career_level"])
         unlocked = tool_level >= required_tool and career_level >= required_career
-        status = "可進入" if unlocked else (
-            f"需要工具 Lv.{required_tool}／職業 Lv.{required_career}"
-        )
+        status = "可進入" if unlocked else f"鎖定：工具 {required_tool}／職業 {required_career}"
         area_lines.append(
-            f"**{area['name']}**｜{status}\n"
-            f"{area['description']} 基礎消耗 {int(area['base_stamina_cost'])} 體力、"
-            f"{int(area['spirit_cost'])} 精神力。"
+            f"**{area['name']}**｜{status}｜"
+            f"{int(area['base_stamina_cost'])} 體／{int(area['spirit_cost'])} 精"
         )
 
     description = (
-        f"**魔晶礦師**：Lv.{career_level}｜經驗 {int(career['exp'])}\n"
-        f"**挖礦工具**：Lv.{tool_level}\n"
-        f"**體力**：{int(snapshot['player']['stamina'])}／{int(snapshot['player']['max_stamina'])}"
-        "｜每天凌晨 00:00 重置\n"
-        f"**精神力**：{int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}\n"
-        f"**魔法水晶原礦**：{int(inventory.get('raw_crystal', 0))}\n"
-        f"**鐵礦**：{int(inventory.get('iron_ore', 0))}\n\n"
-        + "\n\n".join(area_lines)
-        + "\n\n魔晶礦師 Lv.2 後，可用 2 個原礦與 1 個鐵礦精煉成高價魔法水晶。"
+        f"**魔晶礦師 Lv.{career_level}**｜經驗 {int(career['exp'])}｜挖礦工具 Lv.{tool_level}\n"
+        f"**體力** {int(snapshot['player']['stamina'])}／{int(snapshot['player']['max_stamina'])}｜"
+        f"**精神力** {int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}\n"
+        f"原礦 {int(inventory.get('raw_crystal', 0))}｜鐵礦 {int(inventory.get('iron_ore', 0))}\n\n"
+        + "\n".join(area_lines)
+        + "\n\nLv.2 起可在工坊精煉魔法水晶。"
     )
     if notice:
         description = f"**本次結果**\n{notice}\n\n{description}"
@@ -6863,9 +6856,8 @@ class FishingRouteView(UserOwnedView):
             await _town_life_send_error(interaction, exc)
             return
         notice = (
-            f"釣到 {item_name(str(result['item_key']))}×{int(result['quantity'])}，"
-            f"消耗 {int(result['stamina_cost'])} 體力、"
-            f"{int(result['spirit_cost'])} 精神力。"
+            f"{item_name(str(result['item_key']))}×{int(result['quantity'])}｜"
+            f"-{int(result['stamina_cost'])} 體力／-{int(result['spirit_cost'])} 精神力"
         )
         await interaction.response.edit_message(
             embed=fishing_embed(self.owner_id, notice=notice, item_key=str(result["item_key"])),
@@ -6881,8 +6873,8 @@ class FishingRouteView(UserOwnedView):
             await _town_life_send_error(interaction, exc)
             return
         notice = (
-            f"採集到 {item_name(str(result['item_key']))}×{int(result['quantity'])}，"
-            f"消耗 {int(result['stamina_cost'])} 體力、{int(result['spirit_cost'])} 精神力。"
+            f"{item_name(str(result['item_key']))}×{int(result['quantity'])}｜"
+            f"-{int(result['stamina_cost'])} 體力／-{int(result['spirit_cost'])} 精神力"
         )
         await interaction.response.edit_message(
             embed=fishing_embed(self.owner_id, notice=notice, item_key=str(result["item_key"])),
@@ -6927,10 +6919,8 @@ class CrystalRouteView(UserOwnedView):
             await _town_life_send_error(interaction, exc)
             return
         notice = (
-            f"在{result['area_name']}挖到 "
-            f"{item_name(str(result['item_key']))}×{int(result['quantity'])}，"
-            f"消耗 {int(result['stamina_cost'])} 體力、"
-            f"{int(result['spirit_cost'])} 精神力。"
+            f"{result['area_name']}｜{item_name(str(result['item_key']))}×{int(result['quantity'])}｜"
+            f"-{int(result['stamina_cost'])} 體力／-{int(result['spirit_cost'])} 精神力"
         )
         await interaction.response.edit_message(
             embed=mining_embed(self.owner_id, notice=notice, item_key=str(result["item_key"])),
