@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# stern-monk-zh-tw v29 town-life professions deploy
+# stern-monk-zh-tw v29.1 town-life slash-command deploy
 # 主要程式碼集中於本檔；data/ 僅保存教學與台詞資料。
 
 
@@ -2148,7 +2148,7 @@ def locked_operation_embed(
         "🔒 操作畫面已鎖定",
         f"**{display_name}** 的操作畫面已超過 5 分鐘沒有互動。\n\n"
         "為避免他人誤觸，所有按鈕與選單已關閉。\n"
-        "需要繼續操作時，請重新輸入 `/學生資料`。",
+        "需要繼續操作時，請重新輸入 `/學生資料` 或 `/城下町`。",
         color=0x747F8D,
     )
     embed.set_footer(
@@ -2192,7 +2192,7 @@ def personal_panel_embed(
 
     if locked:
         description += (
-            "\n\n🔒 此面板操作入口已關閉，請重新輸入 /學生資料。"
+            "\n\n🔒 此面板操作入口已關閉，請重新輸入 /學生資料 或 /城下町。"
         )
 
     embed = monk_embed(
@@ -2349,7 +2349,7 @@ async def edit_player_panel_from_modal(
     if session is None:
         await interaction.response.send_message(
             "這張操作畫面已超過 5 分鐘沒有互動並已鎖定。"
-            "請重新輸入 `/學生資料`。",
+            "請重新輸入 `/學生資料` 或 `/城下町`。",
             ephemeral=True,
         )
         return False
@@ -2878,9 +2878,9 @@ class MonkClient(discord.Client):
         TOWN_LIFE_DB.initialize()
         logger.info("修士學籍與城下町生活資料庫已初始化：%s", SETTINGS.monk_db_path)
 
-        # 玩家功能改由 /學生資料 開啟，不再註冊公共入口。
+        # 玩家功能改由 /學生資料 或 /城下町 開啟，不再註冊公共入口。
         # 舊版已貼出的固定面板不會在重啟後恢復操作。
-        logger.info("玩家學生資料改由斜線指令開啟。")
+        logger.info("玩家面板可由 /學生資料 或 /城下町 斜線指令開啟。")
         if SETTINGS.guild_id is not None:
             guild = discord.Object(id=SETTINGS.guild_id)
             self.tree.copy_global_to(guild=guild)
@@ -3398,7 +3398,7 @@ class UserOwnedView(discord.ui.View):
         ):
             await interaction.response.send_message(
                 "這不是你目前的學生資料面板。"
-                "請重新輸入 `/學生資料`。",
+                "請重新輸入 `/學生資料` 或 `/城下町`。",
                 ephemeral=True,
             )
             return False
@@ -3407,7 +3407,7 @@ class UserOwnedView(discord.ui.View):
         if session is None or session.message.id != message.id:
             await interaction.response.send_message(
                 "這張學生資料的操作入口已關閉。"
-                "請重新輸入 `/學生資料`。",
+                "請重新輸入 `/學生資料` 或 `/城下町`。",
                 ephemeral=True,
             )
             return False
@@ -3751,7 +3751,7 @@ class EditPlaceModal(discord.ui.Modal, title="編輯地點資料"):
         if session is None:
             await interaction.response.send_message(
                 "這張學生資料的操作入口已關閉。"
-                "請重新輸入 `/學生資料`。",
+                "請重新輸入 `/學生資料` 或 `/城下町`。",
                 ephemeral=True,
             )
             return
@@ -4902,7 +4902,7 @@ class ShopLinkModal(discord.ui.Modal, title="設定店鋪論壇貼文"):
         session = current_player_panel(self.owner_id)
         if session is None:
             await interaction.response.send_message(
-                "這張學生資料的操作入口已關閉。請重新輸入 `/學生資料`。",
+                "這張學生資料的操作入口已關閉。請重新輸入 `/學生資料` 或 `/城下町`。",
                 ephemeral=True,
             )
             return
@@ -7330,24 +7330,20 @@ class PlayerPanelHomeView(UserOwnedView):
         )
 
 
-@tree.command(
-    name="學生資料",
-    description="查看並管理自己的學籍、地點與神諭設定",
-)
-async def student_data_command(
+async def open_player_panel_page(
     interaction: discord.Interaction,
-) -> None:
+    *,
+    embed: discord.Embed,
+    view: discord.ui.View,
+) -> discord.InteractionMessage:
+    """Replace the player's previous interactive panel with a new page."""
     await interaction.response.defer(thinking=True)
 
-    # 每次重新輸入指令，都關閉並移除上一張個人操作面板，
-    # 讓頻道中只保留玩家目前這一張。
     previous_session = current_player_panel(interaction.user.id)
     if previous_session is not None:
         clear_player_panel_session(previous_session)
 
-    previous_message = await fetch_saved_player_panel(
-        interaction.user.id
-    )
+    previous_message = await fetch_saved_player_panel(interaction.user.id)
     if previous_message is not None:
         try:
             await previous_message.delete()
@@ -7356,8 +7352,6 @@ async def student_data_command(
             discord.Forbidden,
             discord.HTTPException,
         ):
-            # 無法刪除時仍會覆寫資料庫紀錄，舊按鈕也因 Railway
-            # 重啟或原工作階段失效而無法操作。
             try:
                 await previous_message.edit(view=None)
             except (
@@ -7367,6 +7361,32 @@ async def student_data_command(
             ):
                 pass
 
+    message = await interaction.edit_original_response(
+        embed=embed,
+        attachments=[],
+        view=view,
+    )
+
+    ACADEMY_DB.save_player_panel(
+        user_id=interaction.user.id,
+        channel_id=message.channel.id,
+        message_id=message.id,
+    )
+    activate_player_panel(
+        owner_id=interaction.user.id,
+        owner_name=interaction.user.display_name,
+        message=message,
+    )
+    return message
+
+
+@tree.command(
+    name="學生資料",
+    description="查看並管理自己的學籍、地點與神諭設定",
+)
+async def student_data_command(
+    interaction: discord.Interaction,
+) -> None:
     profile = ACADEMY_DB.get_profile_bundle(
         interaction.user.id
     )
@@ -7384,20 +7404,24 @@ async def student_data_command(
         embed = student_dashboard_embed(interaction.user.id)
         view = StudentHubView(interaction.user.id)
 
-    message = await interaction.edit_original_response(
+    await open_player_panel_page(
+        interaction,
         embed=embed,
         view=view,
     )
 
-    ACADEMY_DB.save_player_panel(
-        user_id=interaction.user.id,
-        channel_id=message.channel.id,
-        message_id=message.id,
-    )
-    activate_player_panel(
-        owner_id=interaction.user.id,
-        owner_name=interaction.user.display_name,
-        message=message,
+
+@tree.command(
+    name="城下町",
+    description="直接開啟種田、釣魚、畜牧與魔晶採集職業頁面",
+)
+async def town_life_command(
+    interaction: discord.Interaction,
+) -> None:
+    await open_player_panel_page(
+        interaction,
+        embed=town_life_home_embed(interaction.user.id),
+        view=TownLifeHubView(interaction.user.id),
     )
 
 
@@ -7536,8 +7560,8 @@ async def monk_status(
     )
     await interaction.response.send_message(
         "修士目前在線。\n\n"
-        "玩家操作方式：**`/學生資料`、`/今日穿搭推薦`**\n"
-        "公開斜線指令數量：**4**\n"
+        "玩家操作方式：**`/學生資料`、`/城下町`、`/今日穿搭推薦`**\n"
+        "公開斜線指令數量：**5**\n"
         "AI 教學：**永久停用**\n"
         f"AI 告解：**{confession_ai_status}**\n"
         f"AI 神諭：**{oracle_ai_status}**\n"
