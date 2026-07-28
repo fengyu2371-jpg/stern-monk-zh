@@ -6346,76 +6346,94 @@ def mining_embed(user_id: int, *, notice: str = "", item_key: str = "") -> disco
     embed = _town_life_embed_with_image(embed, "crystal")
     return _town_life_embed_with_item_thumbnail(embed, item_key)
 
+INVENTORY_CATEGORY_LABELS: dict[str, str] = {
+    "farming": "農牧物資",
+    "fishing": "漁獲與採集",
+    "crystal": "礦物與魔晶",
+    "food": "料理",
+    "other": "種子與補給",
+}
+INVENTORY_PAGE_SIZE = 5
+
+
+def _inventory_category(item_key: str) -> str:
+    category = str(ITEM_CONFIG.get(item_key, {}).get("category", "other"))
+    return category if category in INVENTORY_CATEGORY_LABELS else "other"
+
+
+def _inventory_keys(user_id: int, category: str) -> list[str]:
+    inventory = TOWN_LIFE_DB.get_snapshot(user_id)["inventory"]
+    return [
+        str(key)
+        for key, quantity in sorted(
+            inventory.items(), key=lambda pair: item_name(str(pair[0]))
+        )
+        if int(quantity) > 0 and _inventory_category(str(key)) == category
+    ]
+
+
 def inventory_market_embed(
     user_id: int,
     *,
     notice: str = "",
     selected_item_key: str = "",
+    category: str = "farming",
+    page: int = 0,
 ) -> discord.Embed:
     snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
     inventory = snapshot["inventory"]
-    category_lines: dict[str, list[str]] = {
-        "farming": [],
-        "fishing": [],
-        "crystal": [],
-        "food": [],
-        "other": [],
-    }
-    for key, quantity in inventory.items():
-        item = ITEM_CONFIG.get(key, {})
-        category = str(item.get("category", "other"))
-        if category not in category_lines:
-            category = "other"
-        sell_price = int(item.get("sell", 0))
-        if key in UPGRADE_MATERIAL_KEYS:
-            price_text = f"｜單價 {sell_price}｜自動保留升級需求"
-        else:
-            price_text = f"｜單價 {sell_price}" if sell_price > 0 else "｜不可出售"
-        category_lines[category].append(
-            f"{item_name(key)}×{int(quantity)}{price_text}"
-        )
-    labels = {
-        "farming": "農牧物資",
-        "fishing": "漁獲與採集",
-        "crystal": "礦物與魔晶",
-        "food": "料理",
-        "other": "種子與補給",
-    }
+    if category not in INVENTORY_CATEGORY_LABELS:
+        category = "farming"
+    keys = _inventory_keys(user_id, category)
+    page_count = max(1, (len(keys) + INVENTORY_PAGE_SIZE - 1) // INVENTORY_PAGE_SIZE)
+    page = max(0, min(int(page), page_count - 1))
+    page_keys = keys[page * INVENTORY_PAGE_SIZE:(page + 1) * INVENTORY_PAGE_SIZE]
+
+    if selected_item_key not in page_keys:
+        selected_item_key = page_keys[0] if page_keys else ""
+
     lines = [
         f"**麻瓜幣**：{int(snapshot['player']['coins'])}",
         f"**精神力**：{int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}",
+        f"**分類**：{INVENTORY_CATEGORY_LABELS[category]}｜第 {page + 1}／{page_count} 頁",
     ]
-    for category in ("farming", "fishing", "crystal", "food", "other"):
-        values = category_lines[category]
-        lines.append(f"\n**{labels[category]}**\n" + ("\n".join(values) if values else "目前沒有"))
-    if selected_item_key and int(inventory.get(selected_item_key, 0)) > 0:
+
+    if selected_item_key:
+        quantity = int(inventory.get(selected_item_key, 0))
         selected = ITEM_CONFIG.get(selected_item_key, {})
-        selected_sell = int(selected.get("sell", 0))
+        sell_price = int(selected.get("sell", 0))
         if selected_item_key in FOOD_RECIPE_CONFIG:
             recipe = FOOD_RECIPE_CONFIG[selected_item_key]
-            spirit_restore = int(recipe["spirit_restore"])
-            stamina_restore = int(recipe.get("stamina_restore", 0))
-            selected_price = (
-                f"食用：+{stamina_restore} 體力／+{spirit_restore} 精神力"
-                "｜料理不可出售"
+            summary = (
+                f"食用後恢復 {int(recipe.get('stamina_restore', 0))} 體力、"
+                f"{int(recipe['spirit_restore'])} 精神力"
             )
         elif selected_item_key == "stamina_potion":
-            selected_price = "使用：+250 體力｜藥水不可出售"
+            summary = "使用後恢復 250 體力"
+        elif selected_item_key in UPGRADE_MATERIAL_KEYS:
+            summary = f"單價 {sell_price}｜系統會保留下一級工具所需數量"
+        elif sell_price > 0:
+            summary = f"單價 {sell_price} 麻瓜幣"
         else:
-            selected_price = (
-                f"每份可售 {selected_sell} 麻瓜幣"
-                if selected_sell > 0
-                else "此道具不可出售"
-            )
-        lines.insert(
-            2,
-            f"\n**目前查看：{item_name(selected_item_key)}**\n"
-            f"持有×{int(inventory.get(selected_item_key, 0))}｜{selected_price}",
-        )
+            summary = "不可出售"
+        lines += [
+            "",
+            f"**目前查看：{item_name(selected_item_key)}**",
+            f"持有×{quantity}｜{summary}",
+        ]
+    else:
+        lines += ["", "這個分類目前沒有物品。"]
+
+    if page_keys:
+        lines += ["", "**本頁物品**"]
+        for key in page_keys:
+            lines.append(f"{item_name(key)} ×{int(inventory.get(key, 0))}")
+
     description = "\n".join(lines)
     if notice:
         description = f"**本次結果**\n{notice}\n\n{description}"
-    embed = monk_embed("河岸市集｜物資背包與出售", description, color=0x8C744B)
+    embed = monk_embed("河岸市集｜分類背包", description, color=0x8C744B)
+    embed.set_footer(text="切換分類或翻頁後，再選擇要查看的物品。")
     return _town_life_embed_with_item_thumbnail(embed, selected_item_key)
 
 
@@ -7276,27 +7294,19 @@ class StoveView(UserOwnedView):
         )
 
 
-class InventoryItemSelect(discord.ui.Select):
-    def __init__(self, owner_id: int, selected_item_key: str = "") -> None:
+class InventoryCategorySelect(discord.ui.Select):
+    def __init__(self, owner_id: int, category: str) -> None:
         self.owner_id = int(owner_id)
-        snapshot = TOWN_LIFE_DB.get_snapshot(owner_id)
-        inventory = snapshot["inventory"]
-        item_keys = [
-            str(key)
-            for key, quantity in sorted(inventory.items(), key=lambda pair: item_name(str(pair[0])))
-            if int(quantity) > 0 and (TOWN_LIFE_ITEM_ASSET_ROOT / f"{key}.png").is_file()
-        ][:25]
         options = [
             discord.SelectOption(
-                label=item_name(key),
+                label=label,
                 value=key,
-                description=f"持有 {int(inventory.get(key, 0))} 份",
-                default=(key == selected_item_key),
+                default=(key == category),
             )
-            for key in item_keys
+            for key, label in INVENTORY_CATEGORY_LABELS.items()
         ]
         super().__init__(
-            placeholder="選擇道具查看、出售或食用",
+            placeholder="選擇背包分類",
             min_values=1,
             max_values=1,
             options=options,
@@ -7304,88 +7314,194 @@ class InventoryItemSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        selected_item_key = self.values[0]
+        category = self.values[0]
+        keys = _inventory_keys(self.owner_id, category)
+        selected = keys[0] if keys else ""
         await interaction.response.edit_message(
             embed=inventory_market_embed(
                 self.owner_id,
-                selected_item_key=selected_item_key,
+                selected_item_key=selected,
+                category=category,
+                page=0,
             ),
-            attachments=town_life_item_attachments(selected_item_key),
-            view=InventoryMarketView(self.owner_id, selected_item_key=selected_item_key),
+            attachments=town_life_item_attachments(selected),
+            view=InventoryMarketView(
+                self.owner_id,
+                selected_item_key=selected,
+                category=category,
+                page=0,
+            ),
+        )
+
+
+class InventoryItemSelect(discord.ui.Select):
+    def __init__(
+        self,
+        owner_id: int,
+        *,
+        category: str,
+        page: int,
+        selected_item_key: str = "",
+    ) -> None:
+        self.owner_id = int(owner_id)
+        self.category = category
+        self.page = int(page)
+        inventory = TOWN_LIFE_DB.get_snapshot(owner_id)["inventory"]
+        keys = _inventory_keys(owner_id, category)
+        page_keys = keys[self.page * INVENTORY_PAGE_SIZE:(self.page + 1) * INVENTORY_PAGE_SIZE]
+        options = [
+            discord.SelectOption(
+                label=item_name(key),
+                value=key,
+                description=f"持有 {int(inventory.get(key, 0))} 份",
+                default=(key == selected_item_key),
+            )
+            for key in page_keys
+        ]
+        super().__init__(
+            placeholder="選擇本頁物品",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        selected = self.values[0]
+        await interaction.response.edit_message(
+            embed=inventory_market_embed(
+                self.owner_id,
+                selected_item_key=selected,
+                category=self.category,
+                page=self.page,
+            ),
+            attachments=town_life_item_attachments(selected),
+            view=InventoryMarketView(
+                self.owner_id,
+                selected_item_key=selected,
+                category=self.category,
+                page=self.page,
+            ),
         )
 
 
 class InventoryMarketView(UserOwnedView):
-    def __init__(self, owner_id: int, *, selected_item_key: str = "") -> None:
-        super().__init__(owner_id, timeout=900, add_home_button=False)
-        self.selected_item_key = selected_item_key or first_inventory_item_key(owner_id)
-        snapshot = TOWN_LIFE_DB.get_snapshot(owner_id)
-        inventory = snapshot["inventory"]
-        if any(int(quantity) > 0 for quantity in inventory.values()):
-            self.add_item(InventoryItemSelect(owner_id, self.selected_item_key))
+    def __init__(
+        self,
+        owner_id: int,
+        *,
+        selected_item_key: str = "",
+        category: str = "farming",
+        page: int = 0,
+    ) -> None:
+        super().__init__(owner_id, timeout=300, add_home_button=False)
+        self.category = category if category in INVENTORY_CATEGORY_LABELS else "farming"
+        keys = _inventory_keys(owner_id, self.category)
+        self.page_count = max(1, (len(keys) + INVENTORY_PAGE_SIZE - 1) // INVENTORY_PAGE_SIZE)
+        self.page = max(0, min(int(page), self.page_count - 1))
+        page_keys = keys[self.page * INVENTORY_PAGE_SIZE:(self.page + 1) * INVENTORY_PAGE_SIZE]
+        self.selected_item_key = selected_item_key if selected_item_key in page_keys else (page_keys[0] if page_keys else "")
+        inventory = TOWN_LIFE_DB.get_snapshot(owner_id)["inventory"]
 
-        if (
-            self.selected_item_key in FOOD_RECIPE_CONFIG
-            and int(inventory.get(self.selected_item_key, 0)) > 0
-        ):
-            eat_button = discord.ui.Button(
-                label=f"食用一份 {item_name(self.selected_item_key)}",
-                style=discord.ButtonStyle.success,
-                row=2,
-            )
-            eat_button.callback = self._eat_selected
-            self.add_item(eat_button)
-        elif (
-            self.selected_item_key == "stamina_potion"
-            and int(inventory.get(self.selected_item_key, 0)) > 0
-        ):
-            potion_button = discord.ui.Button(
-                label="使用一瓶體力藥水",
-                style=discord.ButtonStyle.success,
-                row=2,
-            )
-            potion_button.callback = self._use_potion
-            self.add_item(potion_button)
+        self.add_item(InventoryCategorySelect(owner_id, self.category))
+        if page_keys:
+            self.add_item(InventoryItemSelect(
+                owner_id,
+                category=self.category,
+                page=self.page,
+                selected_item_key=self.selected_item_key,
+            ))
 
-    async def _eat_selected(self, interaction: discord.Interaction) -> None:
-        food_key = self.selected_item_key
-        if food_key not in FOOD_RECIPE_CONFIG:
-            await _town_life_send_error(
-                interaction,
-                TownLifeError("請先從背包選擇一份料理。"),
-            )
-            return
-        try:
-            result = TOWN_LIFE_DB.eat_food(self.owner_id, food_key)
-        except TownLifeError as exc:
-            await _town_life_send_error(interaction, exc)
-            return
-
-        inventory = TOWN_LIFE_DB.get_snapshot(self.owner_id)["inventory"]
-        selected_item_key = (
-            food_key
-            if int(inventory.get(food_key, 0)) > 0
-            else first_inventory_item_key(self.owner_id)
+        self.previous_page.disabled = self.page <= 0
+        self.next_page.disabled = self.page >= self.page_count - 1
+        self.details.disabled = not bool(self.selected_item_key)
+        self.sell_category.disabled = not any(
+            int(ITEM_CONFIG.get(key, {}).get("sell", 0)) > 0 for key in keys
         )
-        notice = (
-            f"食用{item_name(food_key)}×1｜"
-            f"+{int(result['stamina_restored'])} 體力／"
-            f"+{int(result['spirit_restored'])} 精神力｜"
-            f"目前體力 {int(result['stamina'])}／{int(result['max_stamina'])}，"
-            f"精神力 {int(result['spirit'])}／{int(result['max_spirit'])}"
-        )
+
+        if self.selected_item_key in FOOD_RECIPE_CONFIG and int(inventory.get(self.selected_item_key, 0)) > 0:
+            button = discord.ui.Button(label="食用一份", style=discord.ButtonStyle.success, row=3)
+            button.callback = self._eat_selected
+            self.add_item(button)
+        elif self.selected_item_key == "stamina_potion" and int(inventory.get(self.selected_item_key, 0)) > 0:
+            button = discord.ui.Button(label="使用藥水", style=discord.ButtonStyle.success, row=3)
+            button.callback = self._use_potion
+            self.add_item(button)
+
+    async def _render(self, interaction: discord.Interaction, *, notice: str = "") -> None:
+        keys = _inventory_keys(self.owner_id, self.category)
+        page_count = max(1, (len(keys) + INVENTORY_PAGE_SIZE - 1) // INVENTORY_PAGE_SIZE)
+        page = max(0, min(self.page, page_count - 1))
+        page_keys = keys[page * INVENTORY_PAGE_SIZE:(page + 1) * INVENTORY_PAGE_SIZE]
+        selected = self.selected_item_key if self.selected_item_key in page_keys else (page_keys[0] if page_keys else "")
         await interaction.response.edit_message(
             embed=inventory_market_embed(
                 self.owner_id,
                 notice=notice,
-                selected_item_key=selected_item_key,
+                selected_item_key=selected,
+                category=self.category,
+                page=page,
             ),
-            attachments=town_life_item_attachments(selected_item_key),
+            attachments=town_life_item_attachments(selected),
             view=InventoryMarketView(
                 self.owner_id,
-                selected_item_key=selected_item_key,
+                selected_item_key=selected,
+                category=self.category,
+                page=page,
             ),
         )
+
+    @discord.ui.button(label="上一頁", style=discord.ButtonStyle.secondary, row=2)
+    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.page -= 1
+        self.selected_item_key = ""
+        await self._render(interaction)
+
+    @discord.ui.button(label="下一頁", style=discord.ButtonStyle.secondary, row=2)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.page += 1
+        self.selected_item_key = ""
+        await self._render(interaction)
+
+    @discord.ui.button(label="詳細說明", style=discord.ButtonStyle.primary, row=2)
+    async def details(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        key = self.selected_item_key
+        if not key:
+            await interaction.response.send_message("這一頁目前沒有物品。", ephemeral=True)
+            return
+        item = ITEM_CONFIG.get(key, {})
+        inventory = TOWN_LIFE_DB.get_snapshot(self.owner_id)["inventory"]
+        lines = [
+            f"**{item_name(key)}**",
+            f"持有：{int(inventory.get(key, 0))}",
+            f"分類：{INVENTORY_CATEGORY_LABELS[_inventory_category(key)]}",
+        ]
+        if key in FOOD_RECIPE_CONFIG:
+            recipe = FOOD_RECIPE_CONFIG[key]
+            lines.append(f"效果：恢復 {int(recipe.get('stamina_restore', 0))} 體力、{int(recipe['spirit_restore'])} 精神力")
+            lines.append("販售：不可出售")
+        elif key == "stamina_potion":
+            lines.append("效果：恢復 250 體力")
+            lines.append("販售：不可出售")
+        else:
+            price = int(item.get("sell", 0))
+            lines.append(f"販售：{'每份 ' + str(price) + ' 麻瓜幣' if price > 0 else '不可出售'}")
+            if key in UPGRADE_MATERIAL_KEYS:
+                lines.append("保護：系統會先保留三套工具下一級所需數量，只出售多出的部分。")
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+    async def _eat_selected(self, interaction: discord.Interaction) -> None:
+        key = self.selected_item_key
+        try:
+            result = TOWN_LIFE_DB.eat_food(self.owner_id, key)
+        except TownLifeError as exc:
+            await _town_life_send_error(interaction, exc)
+            return
+        notice = (
+            f"食用{item_name(key)}×1｜+{int(result['stamina_restored'])} 體力／"
+            f"+{int(result['spirit_restored'])} 精神力"
+        )
+        await self._render(interaction, notice=notice)
 
     async def _use_potion(self, interaction: discord.Interaction) -> None:
         try:
@@ -7393,29 +7509,7 @@ class InventoryMarketView(UserOwnedView):
         except TownLifeError as exc:
             await _town_life_send_error(interaction, exc)
             return
-
-        inventory = TOWN_LIFE_DB.get_snapshot(self.owner_id)["inventory"]
-        selected_item_key = (
-            "stamina_potion"
-            if int(inventory.get("stamina_potion", 0)) > 0
-            else first_inventory_item_key(self.owner_id)
-        )
-        notice = (
-            f"使用體力藥水×1｜+{int(result['stamina_restored'])} 體力｜"
-            f"目前體力 {int(result['stamina'])}／{int(result['max_stamina'])}"
-        )
-        await interaction.response.edit_message(
-            embed=inventory_market_embed(
-                self.owner_id,
-                notice=notice,
-                selected_item_key=selected_item_key,
-            ),
-            attachments=town_life_item_attachments(selected_item_key),
-            view=InventoryMarketView(
-                self.owner_id,
-                selected_item_key=selected_item_key,
-            ),
-        )
+        await self._render(interaction, notice=f"使用體力藥水×1｜+{int(result['stamina_restored'])} 體力")
 
     async def _sell(self, interaction: discord.Interaction, category: str, label: str) -> None:
         try:
@@ -7423,49 +7517,22 @@ class InventoryMarketView(UserOwnedView):
         except TownLifeError as exc:
             await _town_life_send_error(interaction, exc)
             return
-        sold_text = "、".join(
-            f"{item_name(key)}×{int(quantity)}"
-            for key, quantity in result["sold"].items()
-        )
+        sold_text = "、".join(f"{item_name(key)}×{int(quantity)}" for key, quantity in result["sold"].items())
         protected = result.get("protected", {})
         protected_text = ""
         if protected:
-            protected_text = "｜保留升級素材：" + "、".join(
-                f"{item_name(key)}×{int(quantity)}"
-                for key, quantity in protected.items()
-            )
-        notice = (
-            f"出售{label}：{sold_text}｜+{int(result['coins'])} 麻瓜幣"
-            f"{protected_text}"
-        )
-        selected_item_key = first_inventory_item_key(self.owner_id)
-        await interaction.response.edit_message(
-            embed=inventory_market_embed(
-                self.owner_id,
-                notice=notice,
-                selected_item_key=selected_item_key,
-            ),
-            attachments=town_life_item_attachments(selected_item_key),
-            view=InventoryMarketView(self.owner_id, selected_item_key=selected_item_key),
-        )
+            protected_text = "｜保留：" + "、".join(f"{item_name(key)}×{int(quantity)}" for key, quantity in protected.items())
+        await self._render(interaction, notice=f"出售{label}：{sold_text}｜+{int(result['coins'])} 麻瓜幣{protected_text}")
 
-    @discord.ui.button(label="出售農牧物資", style=discord.ButtonStyle.success, row=1)
-    async def sell_farming(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self._sell(interaction, "farming", "農牧物資")
+    @discord.ui.button(label="出售目前分類", style=discord.ButtonStyle.success, row=3)
+    async def sell_category(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._sell(interaction, self.category, INVENTORY_CATEGORY_LABELS[self.category])
 
-    @discord.ui.button(label="出售漁採物資", style=discord.ButtonStyle.primary, row=1)
-    async def sell_fishing(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self._sell(interaction, "fishing", "漁採物資")
-
-    @discord.ui.button(label="出售礦晶物資", style=discord.ButtonStyle.primary, row=1)
-    async def sell_crystal(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self._sell(interaction, "crystal", "礦晶物資")
-
-    @discord.ui.button(label="出售全部可售物資", style=discord.ButtonStyle.danger, row=2)
+    @discord.ui.button(label="出售全部可售物資", style=discord.ButtonStyle.danger, row=3)
     async def sell_all(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self._sell(interaction, "all", "全部可售物資")
 
-    @discord.ui.button(label="返回生活職業", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="返回生活職業", style=discord.ButtonStyle.secondary, row=4)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.edit_message(
             embed=town_life_home_embed(self.owner_id),
