@@ -2251,6 +2251,7 @@ class PlayerPanelSession:
                 embed=locked_operation_embed(
                     owner_name=self.owner_name,
                 ),
+                attachments=[],
                 view=None,
             )
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
