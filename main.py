@@ -6373,6 +6373,28 @@ def _inventory_keys(user_id: int, category: str) -> list[str]:
     ]
 
 
+def _inventory_page_count(user_id: int, category: str) -> int:
+    keys = _inventory_keys(user_id, category)
+    return max(1, (len(keys) + INVENTORY_PAGE_SIZE - 1) // INVENTORY_PAGE_SIZE)
+
+
+def _inventory_page_sequence(user_id: int) -> list[tuple[str, int]]:
+    """Return every real backpack page in display order, across categories."""
+    pages: list[tuple[str, int]] = []
+    for category in INVENTORY_CATEGORY_LABELS:
+        keys = _inventory_keys(user_id, category)
+        if not keys:
+            continue
+        page_count = max(1, (len(keys) + INVENTORY_PAGE_SIZE - 1) // INVENTORY_PAGE_SIZE)
+        pages.extend((category, page) for page in range(page_count))
+    return pages or [("farming", 0)]
+
+
+def _inventory_selected_attachments(selected_item_key: str) -> list[discord.File]:
+    """Attach the selected icon so Discord can render it inside the embed thumbnail."""
+    return town_life_item_attachments(selected_item_key) if selected_item_key else []
+
+
 def inventory_market_embed(
     user_id: int,
     *,
@@ -6434,8 +6456,10 @@ def inventory_market_embed(
     if notice:
         description = f"**本次結果**\n{notice}\n\n{description}"
     embed = monk_embed("河岸市集｜分類背包", description, color=0x8C744B)
-    embed.set_footer(text="切換分類或翻頁後，再選擇要查看的物品。道具圖片請按「詳細說明」查看。")
-    return embed
+    embed.set_footer(
+        text="上一頁／下一頁會依序跨分類移動；詳細用途請按「詳細說明」。"
+    )
+    return _town_life_embed_with_item_thumbnail(embed, selected_item_key)
 
 
 async def _town_life_send_error(
@@ -6592,7 +6616,7 @@ class TownLifeHubView(UserOwnedView):
         selected_item_key = first_inventory_item_key(self.owner_id)
         await interaction.response.edit_message(
             embed=inventory_market_embed(self.owner_id, selected_item_key=selected_item_key),
-            attachments=[],
+            attachments=_inventory_selected_attachments(selected_item_key),
             view=InventoryMarketView(self.owner_id, selected_item_key=selected_item_key),
         )
 
@@ -7031,7 +7055,7 @@ class FishingRouteView(UserOwnedView):
         selected_item_key = first_inventory_item_key(self.owner_id)
         await interaction.response.edit_message(
             embed=inventory_market_embed(self.owner_id, selected_item_key=selected_item_key),
-            attachments=[],
+            attachments=_inventory_selected_attachments(selected_item_key),
             view=InventoryMarketView(self.owner_id, selected_item_key=selected_item_key),
         )
 
@@ -7101,7 +7125,7 @@ class CrystalRouteView(UserOwnedView):
         selected_item_key = first_inventory_item_key(self.owner_id)
         await interaction.response.edit_message(
             embed=inventory_market_embed(self.owner_id, selected_item_key=selected_item_key),
-            attachments=[],
+            attachments=_inventory_selected_attachments(selected_item_key),
             view=InventoryMarketView(self.owner_id, selected_item_key=selected_item_key),
         )
 
@@ -7271,7 +7295,7 @@ class StoveView(UserOwnedView):
                 self.owner_id,
                 selected_item_key=selected_item_key,
             ),
-            attachments=[],
+            attachments=_inventory_selected_attachments(selected_item_key),
             view=InventoryMarketView(
                 self.owner_id,
                 selected_item_key=selected_item_key,
@@ -7325,7 +7349,7 @@ class InventoryCategorySelect(discord.ui.Select):
                 category=category,
                 page=0,
             ),
-            attachments=[],
+            attachments=_inventory_selected_attachments(selected),
             view=InventoryMarketView(
                 self.owner_id,
                 selected_item_key=selected,
@@ -7376,7 +7400,7 @@ class InventoryItemSelect(discord.ui.Select):
                 category=self.category,
                 page=self.page,
             ),
-            attachments=[],
+            attachments=_inventory_selected_attachments(selected),
             view=InventoryMarketView(
                 self.owner_id,
                 selected_item_key=selected,
@@ -7396,12 +7420,24 @@ class InventoryMarketView(UserOwnedView):
         page: int = 0,
     ) -> None:
         super().__init__(owner_id, timeout=300, add_home_button=False)
-        self.category = category if category in INVENTORY_CATEGORY_LABELS else "farming"
+        requested_category = category if category in INVENTORY_CATEGORY_LABELS else "farming"
+        self.page_sequence = _inventory_page_sequence(owner_id)
+        requested_page = max(0, int(page))
+        requested_position = (requested_category, requested_page)
+        if requested_position not in self.page_sequence:
+            requested_position = self.page_sequence[0]
+        self.category, self.page = requested_position
+
         keys = _inventory_keys(owner_id, self.category)
-        self.page_count = max(1, (len(keys) + INVENTORY_PAGE_SIZE - 1) // INVENTORY_PAGE_SIZE)
-        self.page = max(0, min(int(page), self.page_count - 1))
-        page_keys = keys[self.page * INVENTORY_PAGE_SIZE:(self.page + 1) * INVENTORY_PAGE_SIZE]
-        self.selected_item_key = selected_item_key if selected_item_key in page_keys else (page_keys[0] if page_keys else "")
+        self.page_count = _inventory_page_count(owner_id, self.category)
+        page_keys = keys[
+            self.page * INVENTORY_PAGE_SIZE:(self.page + 1) * INVENTORY_PAGE_SIZE
+        ]
+        self.selected_item_key = (
+            selected_item_key
+            if selected_item_key in page_keys
+            else (page_keys[0] if page_keys else "")
+        )
         inventory = TOWN_LIFE_DB.get_snapshot(owner_id)["inventory"]
 
         self.add_item(InventoryCategorySelect(owner_id, self.category))
@@ -7413,8 +7449,9 @@ class InventoryMarketView(UserOwnedView):
                 selected_item_key=self.selected_item_key,
             ))
 
-        self.previous_page.disabled = self.page <= 0
-        self.next_page.disabled = self.page >= self.page_count - 1
+        current_index = self.page_sequence.index((self.category, self.page))
+        self.previous_page.disabled = current_index <= 0
+        self.next_page.disabled = current_index >= len(self.page_sequence) - 1
         self.details.disabled = not bool(self.selected_item_key)
         self.sell_category.disabled = not any(
             int(ITEM_CONFIG.get(key, {}).get("sell", 0)) > 0 for key in keys
@@ -7443,7 +7480,7 @@ class InventoryMarketView(UserOwnedView):
                 category=self.category,
                 page=page,
             ),
-            attachments=[],
+            attachments=_inventory_selected_attachments(selected),
             view=InventoryMarketView(
                 self.owner_id,
                 selected_item_key=selected,
@@ -7453,14 +7490,26 @@ class InventoryMarketView(UserOwnedView):
         )
 
     @discord.ui.button(label="上一頁", style=discord.ButtonStyle.secondary, row=2)
-    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        self.page -= 1
+    async def previous_page(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        current_index = self.page_sequence.index((self.category, self.page))
+        self.category, self.page = self.page_sequence[max(0, current_index - 1)]
         self.selected_item_key = ""
         await self._render(interaction)
 
     @discord.ui.button(label="下一頁", style=discord.ButtonStyle.secondary, row=2)
-    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        self.page += 1
+    async def next_page(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        current_index = self.page_sequence.index((self.category, self.page))
+        self.category, self.page = self.page_sequence[
+            min(len(self.page_sequence) - 1, current_index + 1)
+        ]
         self.selected_item_key = ""
         await self._render(interaction)
 
