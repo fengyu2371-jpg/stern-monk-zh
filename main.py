@@ -6500,7 +6500,7 @@ class TownLifeHubView(UserOwnedView):
 
 class ToolShopView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
-        super().__init__(owner_id, timeout=900)
+        super().__init__(owner_id, timeout=900, add_home_button=False)
 
     async def _open(self, interaction: discord.Interaction, route_key: str) -> None:
         await interaction.response.edit_message(
@@ -6581,7 +6581,7 @@ class WorkshopView(UserOwnedView):
     }
 
     def __init__(self, owner_id: int, route_key: str) -> None:
-        super().__init__(owner_id, timeout=900)
+        super().__init__(owner_id, timeout=900, add_home_button=False)
         if route_key not in self.ROUTE_TO_TOOL:
             raise ValueError(f"未知工坊路線：{route_key}")
         self.route_key = route_key
@@ -6707,7 +6707,7 @@ class WorkshopView(UserOwnedView):
 
 class FarmRouteView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
-        super().__init__(owner_id, timeout=900)
+        super().__init__(owner_id, timeout=900, add_home_button=False)
         self.add_item(SeedPurchaseSelect(owner_id))
         self.add_item(CropPlantSelect(owner_id))
 
@@ -6760,7 +6760,7 @@ class FarmRouteView(UserOwnedView):
 
 class RanchView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
-        super().__init__(owner_id, timeout=900)
+        super().__init__(owner_id, timeout=900, add_home_button=False)
 
     async def _buy_animal(self, interaction: discord.Interaction, animal_key: str) -> None:
         try:
@@ -6846,7 +6846,7 @@ class RanchView(UserOwnedView):
 
 class FishingRouteView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
-        super().__init__(owner_id, timeout=900)
+        super().__init__(owner_id, timeout=900, add_home_button=False)
 
     @discord.ui.button(label="河岸釣魚", style=discord.ButtonStyle.primary, row=0)
     async def fish(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -6910,7 +6910,7 @@ class FishingRouteView(UserOwnedView):
 
 class CrystalRouteView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
-        super().__init__(owner_id, timeout=900)
+        super().__init__(owner_id, timeout=900, add_home_button=False)
 
     async def _mine_area(self, interaction: discord.Interaction, area_key: str) -> None:
         try:
@@ -7019,7 +7019,7 @@ class InventoryItemSelect(discord.ui.Select):
 
 class InventoryMarketView(UserOwnedView):
     def __init__(self, owner_id: int, *, selected_item_key: str = "") -> None:
-        super().__init__(owner_id, timeout=900)
+        super().__init__(owner_id, timeout=900, add_home_button=False)
         self.selected_item_key = selected_item_key or first_inventory_item_key(owner_id)
         snapshot = TOWN_LIFE_DB.get_snapshot(owner_id)
         inventory = snapshot["inventory"]
