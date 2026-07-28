@@ -19,6 +19,7 @@ MAX_STAMINA = 1000
 INITIAL_SPIRIT = 100
 MAX_SPIRIT = 100
 MAX_DAILY_FOOD_STAMINA = 600
+TOOL_UPGRADE_SPIRIT_COSTS = (0, 0, 3, 5, 8)
 
 
 class TownLifeError(RuntimeError):
@@ -147,7 +148,7 @@ MINING_AREA_CONFIG: dict[str, dict[str, Any]] = {
         "required_career_level": 1,
         "base_stamina_cost": 12,
         "minimum_stamina_cost": 8,
-        "spirit_cost": 1,
+        "spirit_cost": 0,
         "items": ["stone", "copper_ore", "iron_ore"],
         "weights": [65, 30, 5],
         "base_exp": 7,
@@ -577,13 +578,15 @@ class TownLifeDatabase:
         if updated_at.date() < current_time.date():
             maximum = int(row["max_stamina"])
             now = current_time.isoformat(timespec="seconds")
+            max_spirit = int(row["max_spirit"])
             conn.execute(
                 """
                 UPDATE town_life_players
-                SET stamina = ?, stamina_updated_at = ?, updated_at = ?
+                SET stamina = ?, spirit = ?, stamina_updated_at = ?,
+                    last_rest_date = '', updated_at = ?
                 WHERE user_id = ?
                 """,
-                (maximum, now, now, uid),
+                (maximum, max_spirit, now, now, uid),
             )
             row = conn.execute(
                 "SELECT * FROM town_life_players WHERE user_id = ?",
@@ -619,7 +622,7 @@ class TownLifeDatabase:
         if spirit < amount:
             raise TownLifeError(
                 f"精神力不足。這次需要 {amount} 點，目前只有 {spirit} 點。"
-                "請到工坊料理並食用餐點。"
+                "可先休息、食用料理，或等隔日重置。"
             )
         left = spirit - amount
         now = now_iso()
@@ -828,6 +831,10 @@ class TownLifeDatabase:
                 for key, required in materials.items()
                 if self._inventory_quantity(conn, user_id, key) < required
             }
+            spirit_cost = int(TOOL_UPGRADE_SPIRIT_COSTS[level])
+            if spirit_cost > 0:
+                self._spend_spirit(conn, user_id, spirit_cost)
+
             if missing:
                 raise TownLifeError(
                     "升級素材不足，還缺：" + format_item_requirements(missing) + "。"
@@ -855,6 +862,7 @@ class TownLifeDatabase:
             "level": new_level,
             "cost": cost,
             "materials": materials,
+            "spirit_cost": spirit_cost,
         }
 
     def buy_supply(self, user_id: int, item_key: str, quantity: int) -> dict[str, Any]:
@@ -909,8 +917,7 @@ class TownLifeDatabase:
                 raise TownLifeError(f"沒有{item_name(seed_key)}，先去購買種子。")
             stamina_cost = plant_count * max(1, 4 - ((tool_level - 1) // 2))
             self._spend_stamina(conn, user_id, stamina_cost)
-            spirit_cost = max(1, plant_count)
-            self._spend_spirit(conn, user_id, spirit_cost)
+            spirit_cost = 0
             started = taipei_now()
             ready = started + timedelta(minutes=int(crop["growth_minutes"]))
             for plot in empty_plots[:plant_count]:
@@ -960,9 +967,8 @@ class TownLifeDatabase:
             if not ready_rows:
                 raise TownLifeError("目前沒有成熟的作物。")
             stamina_cost = max(1, len(ready_rows) * 2)
-            spirit_cost = max(1, len(ready_rows))
+            spirit_cost = 0
             self._spend_stamina(conn, user_id, stamina_cost)
-            self._spend_spirit(conn, user_id, spirit_cost)
             rewards: dict[str, int] = {}
             exp_gain = 0
             for row in ready_rows:
@@ -1063,8 +1069,7 @@ class TownLifeDatabase:
                 raise TownLifeError(
                     f"需要 {quantity} 份飼料才能照顧全部{animal['name']}，目前只有 {feed_qty} 份。"
                 )
-            spirit_cost = max(1, min(5, quantity))
-            self._spend_spirit(conn, user_id, spirit_cost)
+            spirit_cost = 0
             self._change_inventory(conn, user_id, "animal_feed", -quantity)
             self._change_inventory(conn, user_id, str(animal["product"]), quantity)
             exp_gain = int(animal["career_exp"]) * quantity
@@ -1094,8 +1099,7 @@ class TownLifeDatabase:
             conn.execute("BEGIN IMMEDIATE")
             self._ensure_player(conn, user_id)
             self._spend_stamina(conn, user_id, 6)
-            spirit_cost = 1
-            self._spend_spirit(conn, user_id, spirit_cost)
+            spirit_cost = 0
             item_key = random.choices(
                 ["wild_berry", "wild_herb", "branch"],
                 weights=[50, 30, 20],
@@ -1127,8 +1131,7 @@ class TownLifeDatabase:
                 raise TownLifeError("要先到對應工坊購買釣具組。")
             stamina_cost = max(5, 10 - tool_level)
             self._spend_stamina(conn, user_id, stamina_cost)
-            spirit_cost = 2
-            self._spend_spirit(conn, user_id, spirit_cost)
+            spirit_cost = 0
             if tool_level == 1:
                 items, weights = ["river_fish", "silver_carp", "old_boot"], [72, 18, 10]
             elif tool_level == 2:
@@ -1384,6 +1387,43 @@ class TownLifeDatabase:
             "stamina": stamina,
             "max_stamina": int(row["max_stamina"]),
             "stamina_daily_remaining": stamina_daily_remaining,
+        }
+
+    def rest_spirit(self, user_id: int) -> dict[str, Any]:
+        with closing(self.connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            player = self._refresh_stamina(conn, user_id)
+            current = int(player["spirit"])
+            maximum = int(player["max_spirit"])
+            if current >= maximum:
+                raise TownLifeError("精神力已滿，不需要休息。")
+            today = today_key()
+            marker = str(player["last_rest_date"] or "")
+            used = 0
+            if marker.startswith(today + ":"):
+                try:
+                    used = int(marker.split(":", 1)[1])
+                except ValueError:
+                    used = 0
+            if used >= 2:
+                raise TownLifeError("今天已經休息兩次，明天再休息。")
+            restored = min(25, maximum - current)
+            used += 1
+            now = now_iso()
+            conn.execute(
+                """
+                UPDATE town_life_players
+                SET spirit = ?, last_rest_date = ?, updated_at = ?
+                WHERE user_id = ?
+                """,
+                (current + restored, f"{today}:{used}", now, str(user_id)),
+            )
+            conn.commit()
+        return {
+            "restored": restored,
+            "spirit": current + restored,
+            "max_spirit": maximum,
+            "remaining_uses": 2 - used,
         }
 
     def use_stamina_potion(self, user_id: int, item_key: str = "stamina_potion") -> dict[str, Any]:

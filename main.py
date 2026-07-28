@@ -6079,9 +6079,11 @@ def tool_shop_embed(user_id: int, *, notice: str = "") -> discord.Embed:
                 for item_key, quantity in dict(info["materials"][level]).items()
             }
             action = "購買" if level == 0 else f"升至 Lv.{level + 1}"
+            spirit_cost = int(TOOL_UPGRADE_SPIRIT_COSTS[level])
             next_text = (
                 f"{action}需要 {cost} 麻瓜幣｜"
-                f"{format_item_requirements(materials)}"
+                f"{format_item_requirements(materials)}｜"
+                f"精神力 {spirit_cost}"
             )
         lines.append(
             f"**{info['workshop']}｜{info['name']} Lv.{level}**\n"
@@ -6131,9 +6133,11 @@ def workshop_embed(
             for item_key, quantity in dict(info["materials"][level]).items()
         }
         action = "購買 Lv.1" if level == 0 else f"升級至 Lv.{level + 1}"
+        spirit_cost = int(TOOL_UPGRADE_SPIRIT_COSTS[level])
         upgrade_text = (
             f"{action}：{cost} 麻瓜幣｜"
-            f"{format_item_requirements(materials)}"
+            f"{format_item_requirements(materials)}｜"
+            f"精神力 {spirit_cost}"
         )
 
     recipe_lines: list[str] = []
@@ -6573,6 +6577,28 @@ class TownLifeHubView(UserOwnedView):
             view=InventoryMarketView(self.owner_id, selected_item_key=selected_item_key),
         )
 
+    @discord.ui.button(label="休息片刻", style=discord.ButtonStyle.success, row=2)
+    async def rest_spirit(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        try:
+            result = TOWN_LIFE_DB.rest_spirit(self.owner_id)
+        except TownLifeError as exc:
+            await _town_life_send_error(interaction, exc)
+            return
+        notice = (
+            f"休息後恢復 {int(result['restored'])} 精神力｜"
+            f"目前 {int(result['spirit'])}／{int(result['max_spirit'])}｜"
+            f"今日剩餘休息 {int(result['remaining_uses'])} 次"
+        )
+        await interaction.response.edit_message(
+            embed=town_life_home_embed(self.owner_id, notice=notice),
+            attachments=[],
+            view=TownLifeHubView(self.owner_id),
+        )
+
     @discord.ui.button(label="返回城下町", style=discord.ButtonStyle.secondary, row=2)
     async def back_to_town(
         self,
@@ -6735,7 +6761,8 @@ class WorkshopView(UserOwnedView):
         action = "購買" if int(result["level"]) == 1 else "升級"
         notice = (
             f"已{action}{tool_name(self.tool_key)}至 Lv.{int(result['level'])}，"
-            f"支付 {int(result['cost'])} 麻瓜幣；{material_text}。"
+            f"支付 {int(result['cost'])} 麻瓜幣；{material_text}；"
+            f"精神力 -{int(result.get('spirit_cost', 0))}。"
         )
         await interaction.response.edit_message(
             embed=workshop_embed(self.owner_id, self.route_key, notice=notice, item_key=self.tool_key),
