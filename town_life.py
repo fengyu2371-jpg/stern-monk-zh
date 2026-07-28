@@ -14,8 +14,8 @@ STAMINA_REGEN_MINUTES = 10
 MAX_TOOL_LEVEL = 5
 MAX_CAREER_LEVEL = 5
 INITIAL_COINS = 600
-INITIAL_STAMINA = 100
-MAX_STAMINA = 100
+INITIAL_STAMINA = 1000
+MAX_STAMINA = 1000
 
 
 class TownLifeError(RuntimeError):
@@ -207,8 +207,8 @@ class TownLifeDatabase:
                 CREATE TABLE IF NOT EXISTS town_life_players (
                     user_id TEXT PRIMARY KEY,
                     coins INTEGER NOT NULL DEFAULT 600,
-                    stamina INTEGER NOT NULL DEFAULT 100,
-                    max_stamina INTEGER NOT NULL DEFAULT 100,
+                    stamina INTEGER NOT NULL DEFAULT 1000,
+                    max_stamina INTEGER NOT NULL DEFAULT 1000,
                     stamina_updated_at TEXT NOT NULL,
                     last_rest_date TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
@@ -261,6 +261,20 @@ class TownLifeDatabase:
                 CREATE INDEX IF NOT EXISTS idx_town_life_inventory_user
                 ON town_life_inventory(user_id);
                 """
+            )
+
+            # 將舊版較低的體力上限安全提升到目前基礎上限。
+            # 保留玩家已消耗的體力量，例如 70/100 會遷移成 970/1000。
+            now = now_iso()
+            conn.execute(
+                """
+                UPDATE town_life_players
+                SET stamina = MIN(?, stamina + (? - max_stamina)),
+                    max_stamina = ?,
+                    updated_at = ?
+                WHERE max_stamina < ?
+                """,
+                (MAX_STAMINA, MAX_STAMINA, MAX_STAMINA, now, MAX_STAMINA),
             )
             conn.commit()
 
