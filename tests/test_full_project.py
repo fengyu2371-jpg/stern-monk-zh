@@ -210,6 +210,7 @@ class ProjectStaticTests(DatabaseCase):
             main.CrystalRouteView(self.user_id),
             main.StoveView(self.user_id),
             main.InventoryMarketView(self.user_id),
+            main.MailboxView(self.user_id),
             *(main.WorkshopView(self.user_id, route) for route in ("farming", "fishing", "crystal")),
         ]
         for view in views:
@@ -324,6 +325,94 @@ class PlayerAndTransactionTests(DatabaseCase):
             row["stamina_updated_at"],
             current_time.isoformat(timespec="seconds"),
         )
+
+    def test_maintenance_mail_is_seeded_once_for_existing_players(self) -> None:
+        marker_key = f"mail_issued:{town_life.MAINTENANCE_MAIL_KEY}"
+        self.transaction(
+            (
+                "DELETE FROM town_life_mailbox WHERE user_id = ?",
+                (str(self.user_id),),
+            ),
+            (
+                "DELETE FROM town_life_system_markers WHERE marker_key = ?",
+                (marker_key,),
+            ),
+        )
+
+        self.db.initialize()
+        first = self.db.get_snapshot(self.user_id)["mailbox"]
+        self.db.initialize()
+        second = self.db.get_snapshot(self.user_id)["mailbox"]
+
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(second), 1)
+        self.assertEqual(first[0]["mail_key"], town_life.MAINTENANCE_MAIL_KEY)
+        self.assertEqual(first[0]["item_key"], "maintenance_stamina_potion")
+        self.assertEqual(first[0]["quantity"], 1)
+        self.assertEqual(first[0]["claimed_at"], "")
+
+        later_user = self.user_id + 1
+        self.db.get_snapshot(later_user)
+        self.assertEqual(self.db.get_snapshot(later_user)["mailbox"], [])
+
+    def test_mail_claim_is_atomic_and_cannot_be_repeated(self) -> None:
+        inserted = self.db.issue_mail(
+            self.user_id,
+            mail_key="test_reward",
+            title="測試補償",
+            body="測試信件",
+            item_key="maintenance_stamina_potion",
+            quantity=1,
+        )
+        duplicate = self.db.issue_mail(
+            self.user_id,
+            mail_key="test_reward",
+            title="測試補償",
+            body="測試信件",
+            item_key="maintenance_stamina_potion",
+            quantity=1,
+        )
+        self.assertTrue(inserted)
+        self.assertFalse(duplicate)
+
+        result = self.db.claim_all_mail(self.user_id)
+        snapshot = self.db.get_snapshot(self.user_id)
+
+        self.assertEqual(result["claimed_count"], 1)
+        self.assertEqual(result["rewards"], {"maintenance_stamina_potion": 1})
+        self.assertEqual(snapshot["inventory"]["maintenance_stamina_potion"], 1)
+        self.assertTrue(snapshot["mailbox"][0]["claimed_at"])
+        with self.assertRaises(TownLifeError):
+            self.db.claim_all_mail(self.user_id)
+        self.assertEqual(
+            self.db.get_snapshot(self.user_id)["inventory"]["maintenance_stamina_potion"],
+            1,
+        )
+
+    def test_mail_claim_database_failure_rolls_back_attachment_and_status(self) -> None:
+        self.db.issue_mail(
+            self.user_id,
+            mail_key="rollback_reward",
+            title="回滾測試",
+            body="測試信件",
+            item_key="maintenance_stamina_potion",
+            quantity=1,
+        )
+
+        with mock.patch.object(
+            self.db,
+            "_change_inventory",
+            side_effect=sqlite3.OperationalError("forced failure"),
+        ):
+            with self.assertRaises(sqlite3.OperationalError):
+                self.db.claim_all_mail(self.user_id)
+
+        snapshot = self.db.get_snapshot(self.user_id)
+        self.assertEqual(
+            snapshot["inventory"].get("maintenance_stamina_potion", 0),
+            0,
+        )
+        self.assertEqual(snapshot["mailbox"][0]["claimed_at"], "")
 
     def test_chicken_purchase_contract_and_balance(self) -> None:
         self.set_player(coins=5000)
@@ -743,6 +832,34 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(view.previous_page.disabled)
         self.assertTrue(view.next_page.disabled)
         self.assertTrue(view.details.disabled)
+
+    def test_mailbox_embed_and_view_show_unclaimed_compensation(self) -> None:
+        self.db.issue_mail(
+            self.user_id,
+            mail_key="interface_reward",
+            title="城下町維護補償",
+            body="感謝等待維護。",
+            item_key="maintenance_stamina_potion",
+            quantity=1,
+        )
+
+        embed = main.mailbox_embed(self.user_id)
+        view = main.MailboxView(self.user_id)
+
+        self.assertIn("**待領信件**：1 封", embed.description)
+        self.assertIn("維護補償體力藥水×1", embed.description)
+        self.assertEqual(
+            embed.thumbnail.url,
+            "attachment://maintenance_stamina_potion.png",
+        )
+        claim_button = next(
+            child
+            for child in view.children
+            if isinstance(child, main.discord.ui.Button)
+            and str(child.label).startswith("領取全部")
+        )
+        self.assertFalse(claim_button.disabled)
+        self.assertEqual(claim_button.label, "領取全部｜1 封")
 
     def test_backpack_disables_food_when_daily_stamina_limit_is_full(self) -> None:
         self.set_player(
