@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 # stern-monk-zh-tw v29.2 town-life workshops and spirit
-# 主要程式碼集中於本檔；data/ 僅保存教學與台詞資料。
+# 主要程式碼集中於本檔；data/ 僅保存修士 Bot 台詞資料。
 
 
 
@@ -1375,268 +1375,6 @@ class AcademyDatabase:
         return page
 
 
-# ===== knowledge.py =====
-
-import json
-import re
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Literal
-
-
-NO_OFFICIAL_DATA = "目前沒有正式資料"
-
-TUTORIAL_FIELDS = {
-    "id",
-    "title",
-    "keywords",
-    "summary",
-    "details",
-    "related_commands",
-    "warnings",
-    "source_files",
-    "needs_review",
-    "monk_openings",
-    "monk_endings",
-}
-FAQ_FIELDS = {
-    "question_patterns",
-    "answer",
-    "related_tutorial_id",
-    "source_files",
-    "needs_review",
-}
-
-
-class KnowledgeLoadError(RuntimeError):
-    """本地知識庫無法安全載入。"""
-
-
-@dataclass(frozen=True)
-class KnowledgeMatch:
-    kind: Literal["faq", "tutorial"]
-    record: dict[str, Any]
-    tutorial: dict[str, Any]
-    score: int
-
-
-@dataclass(frozen=True)
-class AnswerResult:
-    text: str
-    source: Literal["faq", "tutorial", "none"]
-    match: KnowledgeMatch | None = None
-
-
-def _read_json_list(path: Path, label: str) -> list[dict[str, Any]]:
-    try:
-        with path.open("r", encoding="utf-8") as file:
-            data = json.load(file)
-    except FileNotFoundError as exc:
-        raise KnowledgeLoadError(f"找不到{label}：{path}") from exc
-    except json.JSONDecodeError as exc:
-        raise KnowledgeLoadError(
-            f"{label} JSON 格式錯誤：{path}，第 {exc.lineno} 行"
-        ) from exc
-
-    if not isinstance(data, list):
-        raise KnowledgeLoadError(f"{label}最外層必須是陣列：{path}")
-    if not all(isinstance(item, dict) for item in data):
-        raise KnowledgeLoadError(f"{label}每一筆資料都必須是物件：{path}")
-    return data
-
-
-def _non_empty_string(value: Any) -> bool:
-    return isinstance(value, str) and bool(value.strip())
-
-
-def _string_list(value: Any, *, allow_empty: bool = True) -> bool:
-    return (
-        isinstance(value, list)
-        and (allow_empty or bool(value))
-        and all(_non_empty_string(item) for item in value)
-    )
-
-
-def _validate_tutorials(tutorials: list[dict[str, Any]]) -> None:
-    seen_ids: set[str] = set()
-    for index, item in enumerate(tutorials):
-        missing = TUTORIAL_FIELDS - item.keys()
-        if missing:
-            raise KnowledgeLoadError(
-                f"教學第 {index + 1} 筆缺少欄位：{', '.join(sorted(missing))}"
-            )
-
-        tutorial_id = item["id"]
-        if not _non_empty_string(tutorial_id):
-            raise KnowledgeLoadError(f"教學第 {index + 1} 筆的 id 不可空白")
-        if tutorial_id in seen_ids:
-            raise KnowledgeLoadError(f"教學 id 重複：{tutorial_id}")
-        seen_ids.add(tutorial_id)
-
-        for field in ("title", "summary"):
-            if not _non_empty_string(item[field]):
-                raise KnowledgeLoadError(f"教學 {tutorial_id} 的 {field} 不可空白")
-        for field in (
-            "keywords",
-            "details",
-            "related_commands",
-            "warnings",
-            "source_files",
-        ):
-            if not _string_list(item[field]):
-                raise KnowledgeLoadError(f"教學 {tutorial_id} 的 {field} 必須是字串陣列")
-        for field in ("monk_openings", "monk_endings"):
-            if not _string_list(item[field], allow_empty=False):
-                raise KnowledgeLoadError(f"教學 {tutorial_id} 的 {field} 不可為空")
-        if not isinstance(item["needs_review"], bool):
-            raise KnowledgeLoadError(f"教學 {tutorial_id} 的 needs_review 必須是布林值")
-
-
-def _validate_faqs(
-    faqs: list[dict[str, Any]], tutorial_ids: set[str]
-) -> None:
-    for index, item in enumerate(faqs):
-        missing = FAQ_FIELDS - item.keys()
-        if missing:
-            raise KnowledgeLoadError(
-                f"FAQ 第 {index + 1} 筆缺少欄位：{', '.join(sorted(missing))}"
-            )
-        if not _string_list(item["question_patterns"], allow_empty=False):
-            raise KnowledgeLoadError(f"FAQ 第 {index + 1} 筆的 question_patterns 不可為空")
-        if not _non_empty_string(item["answer"]):
-            raise KnowledgeLoadError(f"FAQ 第 {index + 1} 筆的 answer 不可空白")
-        related_id = item["related_tutorial_id"]
-        if related_id not in tutorial_ids:
-            raise KnowledgeLoadError(
-                f"FAQ 第 {index + 1} 筆引用不存在的教學：{related_id}"
-            )
-        if not _string_list(item["source_files"]):
-            raise KnowledgeLoadError(f"FAQ 第 {index + 1} 筆的 source_files 必須是字串陣列")
-        if not isinstance(item["needs_review"], bool):
-            raise KnowledgeLoadError(f"FAQ 第 {index + 1} 筆的 needs_review 必須是布林值")
-
-
-_NORMALIZE_PATTERN = re.compile(r"[\s？?！!，,。.、：:；;「」『』（）()【】\[\]`*_]+")
-
-
-def normalize_text(text: str) -> str:
-    return _NORMALIZE_PATTERN.sub("", text.strip().casefold())
-
-
-def _candidate_score(question: str, candidate: str) -> int:
-    normalized_candidate = normalize_text(candidate)
-    if not normalized_candidate:
-        return 0
-    if question == normalized_candidate:
-        return 100_000 + len(normalized_candidate)
-    if normalized_candidate in question:
-        return 10_000 + len(normalized_candidate)
-    if len(question) >= 2 and question in normalized_candidate:
-        return 1_000 + len(question)
-    return 0
-
-
-class KnowledgeBase:
-    def __init__(
-        self,
-        tutorials: list[dict[str, Any]],
-        faqs: list[dict[str, Any]],
-    ) -> None:
-        _validate_tutorials(tutorials)
-        tutorial_ids = {str(item["id"]) for item in tutorials}
-        _validate_faqs(faqs, tutorial_ids)
-
-        self.tutorials = tutorials
-        self.faqs = faqs
-        self.tutorial_by_id = {str(item["id"]): item for item in tutorials}
-
-    @classmethod
-    def from_files(cls, tutorials_path: Path, faq_path: Path) -> "KnowledgeBase":
-        tutorials = _read_json_list(tutorials_path, "教學知識庫")
-        faqs = _read_json_list(faq_path, "FAQ 知識庫")
-        return cls(tutorials, faqs)
-
-    def find_faq(self, question: str) -> KnowledgeMatch | None:
-        normalized_question = normalize_text(question)
-        best: KnowledgeMatch | None = None
-
-        for faq in self.faqs:
-            score = max(
-                (_candidate_score(normalized_question, pattern) for pattern in faq["question_patterns"]),
-                default=0,
-            )
-            if score <= 0:
-                continue
-            tutorial = self.tutorial_by_id[str(faq["related_tutorial_id"])]
-            match = KnowledgeMatch("faq", faq, tutorial, score)
-            if best is None or match.score > best.score:
-                best = match
-        return best
-
-    def find_tutorial(self, question: str) -> KnowledgeMatch | None:
-        normalized_question = normalize_text(question)
-        best: KnowledgeMatch | None = None
-        best_rank = (0, 0, 0, 0)
-
-        for tutorial in self.tutorials:
-            candidates = [tutorial["title"], *tutorial["keywords"]]
-            score = max(
-                (_candidate_score(normalized_question, candidate) for candidate in candidates),
-                default=0,
-            )
-            if score <= 0:
-                continue
-            match = KnowledgeMatch("tutorial", tutorial, tutorial, score)
-            # 同分時，具有較長明確關鍵字的主題優先於泛用短詞主題。
-            # 例如「魔杖出現裂痕」應落到強化教學，而不是魔杖取得。
-            normalized_title = normalize_text(tutorial["title"])
-            matched_specific_keywords = sum(
-                1
-                for keyword in tutorial["keywords"]
-                if normalize_text(keyword) in normalized_question
-                and normalize_text(keyword) not in normalized_title
-            )
-            specificity = max(len(normalize_text(item)) for item in candidates)
-            rank = (
-                score,
-                matched_specific_keywords,
-                specificity,
-                len(normalized_title),
-            )
-            if best is None or rank > best_rank:
-                best = match
-                best_rank = rank
-        return best
-
-    def find_local(self, question: str) -> KnowledgeMatch | None:
-        # 固定 FAQ 明確優先；FAQ 完全無命中才查教學關鍵字。
-        return self.find_faq(question) or self.find_tutorial(question)
-
-def render_knowledge_answer(match: KnowledgeMatch, *, concise: bool = False) -> str:
-    if match.kind == "faq":
-        return str(match.record["answer"]).strip()
-
-    tutorial = match.tutorial
-    parts = [str(tutorial["summary"]).strip()]
-    details = tutorial["details"][:1] if concise else tutorial["details"]
-    parts.extend(f"• {line}" for line in details)
-    if tutorial["warnings"] and not concise:
-        parts.append("注意事項：")
-        parts.extend(f"• {line}" for line in tutorial["warnings"])
-    return "\n".join(parts)
-
-
-async def answer_question(
-    knowledge: KnowledgeBase,
-    question: str,
-) -> AnswerResult:
-    match = knowledge.find_local(question)
-    if match is not None:
-        return AnswerResult(render_knowledge_answer(match), match.kind, match)
-
-    return AnswerResult(NO_OFFICIAL_DATA, "none")
-
-
 # ===== confession.py =====
 
 import hashlib
@@ -2189,6 +1927,7 @@ from town_life import (
     CROP_CONFIG,
     FOOD_RECIPE_CONFIG,
     ITEM_CONFIG,
+    MAX_TOOL_LEVEL,
     MINING_AREA_CONFIG,
     TOOL_CONFIG,
     TOOL_UPGRADE_SPIRIT_COSTS,
@@ -2240,10 +1979,6 @@ def load_json(filename: str) -> dict[str, Any]:
 
 
 DIALOGUE = load_json("dialogue.json")
-KNOWLEDGE = KnowledgeBase.from_files(
-    DATA_DIR / "tutorials_zh_tw.json",
-    DATA_DIR / "faq_zh_tw.json",
-)
 ACADEMY_DB = AcademyDatabase(SETTINGS.monk_db_path)
 TOWN_LIFE_DB = TownLifeDatabase(SETTINGS.monk_db_path)
 
@@ -2284,8 +2019,9 @@ async def _report_interaction_error(
         exc_info=(type(error), error, error.__traceback__),
     )
     message = (
-        "操作時發生未預期錯誤，這次變更可能沒有完成。"
-        "請稍後重試；若持續發生，請通知管理員查看 Railway 記錄。"
+        "操作時發生未預期錯誤。若剛才進行交易，資料可能已經完成更新；"
+        "請先重新輸入 `/城下町` 確認，不要立即重複操作。"
+        "若持續發生，請通知管理員查看 Railway 記錄。"
     )
     try:
         if interaction.response.is_done():
@@ -2595,41 +2331,6 @@ async def validate_modal_player_panel(
 
     session.touch()
     return session
-
-
-def knowledge_source_label(match: KnowledgeMatch) -> str:
-    source_type = "固定 FAQ" if match.kind == "faq" else "固定教學"
-    return f"知識庫來源：{source_type}｜{match.tutorial['title']}"
-
-
-def roleplay_lines(match: KnowledgeMatch) -> tuple[str, str]:
-    tutorial = match.tutorial
-    return (
-        random.choice(tutorial["monk_openings"]),
-        random.choice(tutorial["monk_endings"]),
-    )
-
-
-def render_local_reply(
-    match: KnowledgeMatch,
-    *,
-    concise: bool = False,
-    gentle: bool = False,
-) -> str:
-    answer = render_knowledge_answer(match, concise=concise)
-    source_label = f"_{knowledge_source_label(match)}_"
-    if gentle:
-        return (
-            f"{answer}\n\n"
-            "先照正確做法處理；若畫面仍不同，"
-            f"保留截圖詢問管理員。\n\n{source_label}"
-        )
-
-    opening, ending = roleplay_lines(match)
-    return (
-        f"{opening}\n\n{answer}\n\n"
-        f"{ending}\n\n{source_label}"
-    )
 
 
 def random_line(category: str, fallback: str) -> str:
@@ -2994,7 +2695,10 @@ class OutfitKeywordModal(SafeModal, title="今日穿搭推薦｜關鍵詞"):
                 discord.Forbidden,
                 discord.HTTPException,
             ):
-                pass
+                logger.debug(
+                    "無法更新原穿搭互動訊息，改以新訊息回覆。",
+                    exc_info=True,
+                )
 
         await interaction.followup.send(
             embed=embed,
@@ -3150,7 +2854,7 @@ class MonkClient(discord.Client):
         )
         logger.info("修士已上線：%s（%s）", self.user, self.user.id)
         logger.info(
-            "AI 教學：永久停用｜AI 告解：%s｜AI 神諭：%s｜AI 穿搭：%s｜模型：%s｜告解每日上限：%s｜神諭每週上限：%s",
+            "AI 告解：%s｜AI 神諭：%s｜AI 穿搭：%s｜模型：%s｜告解每日上限：%s｜神諭每週上限：%s",
             "啟用" if SETTINGS.confession_ai_available else "停用",
             "啟用" if SETTINGS.oracle_ai_available else "停用",
             "啟用" if SETTINGS.ai_available else "停用",
@@ -3290,14 +2994,6 @@ def town_life_display_attachments(
     if item_key:
         files.extend(town_life_item_attachments(item_key))
     return files
-
-
-def first_inventory_item_key(user_id: int) -> str:
-    snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
-    for key, quantity in sorted(snapshot["inventory"].items()):
-        if int(quantity) > 0 and (TOWN_LIFE_ITEM_ASSET_ROOT / f"{key}.png").is_file():
-            return str(key)
-    return ""
 
 
 def _town_life_embed_with_image(
@@ -3643,7 +3339,10 @@ async def find_shop_cover_message(
             if image_url:
                 return message, image_url
     except (discord.Forbidden, discord.HTTPException):
-        pass
+        logger.debug(
+            "無法掃描論壇歷史訊息取得封面。",
+            exc_info=True,
+        )
 
     return None, None
 
@@ -3709,8 +3408,33 @@ class UserOwnedView(discord.ui.View):
         super().__init__(timeout=None)
         self.owner_id = int(owner_id)
         self.auto_defer = bool(auto_defer)
+        self._town_life_action_started = False
+        self._town_life_action_committed = False
         if add_home_button:
             self.add_item(ReturnToPlayerHomeButton())
+
+    async def begin_town_life_action(
+        self,
+        interaction: discord.Interaction,
+    ) -> bool:
+        """Accept at most one mutating town-life action from this rendered view."""
+        if self._town_life_action_started:
+            await send_ephemeral_message(
+                interaction,
+                "上一筆操作正在處理，請等待畫面更新後再操作。",
+            )
+            return False
+        self._town_life_action_started = True
+        return True
+
+    def mark_town_life_action_committed(self) -> None:
+        """Record that the database transaction succeeded before Discord rendering."""
+        self._town_life_action_committed = True
+
+    def release_town_life_action(self) -> None:
+        """Unlock the current view after a rejected transaction."""
+        self._town_life_action_started = False
+        self._town_life_action_committed = False
 
     async def interaction_check(
         self,
@@ -3762,6 +3486,19 @@ class UserOwnedView(discord.ui.View):
         error: Exception,
         item: discord.ui.Item[Any],
     ) -> None:
+        if self._town_life_action_committed:
+            logger.error(
+                "城下町交易已提交，但 Discord 畫面更新失敗：%s.%s",
+                type(self).__name__,
+                type(item).__name__,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+            await send_ephemeral_message(
+                interaction,
+                "交易資料已經完成更新，但 Discord 畫面更新失敗。"
+                "請重新輸入 `/城下町` 查看最新資料；不要在舊畫面重複操作。",
+            )
+            return
         await _report_interaction_error(
             interaction,
             error,
@@ -4815,12 +4552,6 @@ def public_my_places_embed(user_id: int) -> discord.Embed:
         text="不公開地點的名稱不會顯示在公開摘要。"
     )
     return embed
-
-
-TEACHING_CHOICES = [
-    app_commands.Choice(name=item["title"], value=item["id"])
-    for item in KNOWLEDGE.tutorials
-]
 
 
 def _component_channel_allowed(interaction: discord.Interaction) -> bool:
@@ -6354,7 +6085,7 @@ def town_life_home_embed(
         f"**體力**：{int(player['stamina'])}／{int(player['max_stamina'])}"
         "（每天凌晨 00:00 重置）\n"
         f"**精神力**：{int(player['spirit'])}／{int(player['max_spirit'])}"
-        "（透過料理恢復）\n"
+        "（透過料理或每日休息恢復）\n"
         f"**物資總數**：{inventory_total}\n"
         f"**工具**：{_town_life_tool_text(snapshot)}"
     )
@@ -6852,6 +6583,44 @@ async def _town_life_send_error(
     await send_ephemeral_message(interaction, str(error))
 
 
+async def _town_life_begin_action(
+    component_or_view: discord.ui.Item[Any] | UserOwnedView,
+    interaction: discord.Interaction,
+) -> bool:
+    view = (
+        component_or_view
+        if isinstance(component_or_view, UserOwnedView)
+        else component_or_view.view
+    )
+    if not isinstance(view, UserOwnedView):
+        return True
+    return await view.begin_town_life_action(interaction)
+
+
+def _town_life_release_action(
+    component_or_view: discord.ui.Item[Any] | UserOwnedView,
+) -> None:
+    view = (
+        component_or_view
+        if isinstance(component_or_view, UserOwnedView)
+        else component_or_view.view
+    )
+    if isinstance(view, UserOwnedView):
+        view.release_town_life_action()
+
+
+def _town_life_mark_committed(
+    component_or_view: discord.ui.Item[Any] | UserOwnedView,
+) -> None:
+    view = (
+        component_or_view
+        if isinstance(component_or_view, UserOwnedView)
+        else component_or_view.view
+    )
+    if isinstance(view, UserOwnedView):
+        view.mark_town_life_action_committed()
+
+
 class SeedPurchaseSelect(discord.ui.Select):
     def __init__(self, owner_id: int) -> None:
         self.owner_id = int(owner_id)
@@ -6872,10 +6641,14 @@ class SeedPurchaseSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        if not await _town_life_begin_action(self, interaction):
+            return
         item_key = self.values[0]
         try:
             result = TOWN_LIFE_DB.buy_supply(self.owner_id, item_key, 5)
+            _town_life_mark_committed(self)
         except TownLifeError as exc:
+            _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
         notice = f"購買 {item_name(item_key)}×5，支付 {int(result['cost'])} 麻瓜幣。"
@@ -6906,10 +6679,14 @@ class CropPlantSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        if not await _town_life_begin_action(self, interaction):
+            return
         crop_key = self.values[0]
         try:
             result = TOWN_LIFE_DB.plant_crop(self.owner_id, crop_key)
+            _town_life_mark_committed(self)
         except TownLifeError as exc:
+            _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
         crop_name = str(CROP_CONFIG[crop_key]["name"])
@@ -7025,9 +6802,13 @@ class TownLifeHubView(UserOwnedView):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
+        if not await _town_life_begin_action(self, interaction):
+            return
         try:
             result = TOWN_LIFE_DB.rest_spirit(self.owner_id)
+            _town_life_mark_committed(self)
         except TownLifeError as exc:
+            _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
         notice = (
@@ -7114,10 +6895,14 @@ class MealEatSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        if not await _town_life_begin_action(self, interaction):
+            return
         food_key = self.values[0]
         try:
             result = TOWN_LIFE_DB.eat_food(self.owner_id, food_key)
+            _town_life_mark_committed(self)
         except TownLifeError as exc:
+            _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
         notice = (
@@ -7144,10 +6929,27 @@ class WorkshopView(UserOwnedView):
             raise ValueError(f"未知工坊路線：{route_key}")
         self.route_key = route_key
         self.tool_key = self.ROUTE_TO_TOOL[route_key]
+        tool_level = int(
+            TOWN_LIFE_DB.get_snapshot(owner_id)["tools"].get(self.tool_key, 0)
+        )
+        tool_is_max = tool_level >= MAX_TOOL_LEVEL
 
         upgrade_button = discord.ui.Button(
-            label=f"購買／升級{tool_name(self.tool_key)}",
-            style=(discord.ButtonStyle.success if route_key == "farming" else discord.ButtonStyle.primary),
+            label=(
+                f"{tool_name(self.tool_key)}已達最高等級"
+                if tool_is_max
+                else f"購買／升級{tool_name(self.tool_key)}"
+            ),
+            style=(
+                discord.ButtonStyle.secondary
+                if tool_is_max
+                else (
+                    discord.ButtonStyle.success
+                    if route_key == "farming"
+                    else discord.ButtonStyle.primary
+                )
+            ),
+            disabled=tool_is_max,
             row=0,
         )
         upgrade_button.callback = self._upgrade_tool
@@ -7194,9 +6996,13 @@ class WorkshopView(UserOwnedView):
         self.add_item(back_button)
 
     async def _upgrade_tool(self, interaction: discord.Interaction) -> None:
+        if not await _town_life_begin_action(self, interaction):
+            return
         try:
             result = TOWN_LIFE_DB.buy_or_upgrade_tool(self.owner_id, self.tool_key)
+            _town_life_mark_committed(self)
         except TownLifeError as exc:
+            _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
         material_text = format_item_requirements(dict(result["materials"]))
@@ -7213,9 +7019,13 @@ class WorkshopView(UserOwnedView):
         )
 
     async def _cook(self, interaction: discord.Interaction, recipe_key: str) -> None:
+        if not await _town_life_begin_action(self, interaction):
+            return
         try:
             result = TOWN_LIFE_DB.cook_food(self.owner_id, recipe_key)
+            _town_life_mark_committed(self)
         except TownLifeError as exc:
+            _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
         notice = (
@@ -7229,9 +7039,13 @@ class WorkshopView(UserOwnedView):
         )
 
     async def _refine_crystal(self, interaction: discord.Interaction) -> None:
+        if not await _town_life_begin_action(self, interaction):
+            return
         try:
             result = TOWN_LIFE_DB.refine_crystal(self.owner_id)
+            _town_life_mark_committed(self)
         except TownLifeError as exc:
+            _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
         notice = (
@@ -7272,9 +7086,13 @@ class FarmRouteView(UserOwnedView):
 
     @discord.ui.button(label="收成成熟作物", style=discord.ButtonStyle.success, row=2)
     async def harvest(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await _town_life_begin_action(self, interaction):
+            return
         try:
             result = TOWN_LIFE_DB.harvest_ready_crops(self.owner_id)
+            _town_life_mark_committed(self)
         except TownLifeError as exc:
+            _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
         rewards = "、".join(
@@ -7320,20 +7138,15 @@ class FarmRouteView(UserOwnedView):
 class RanchView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
         super().__init__(owner_id, timeout=900, add_home_button=False)
-        self._animal_purchase_started = False
 
     async def _buy_animal(self, interaction: discord.Interaction, animal_key: str) -> None:
-        if self._animal_purchase_started:
-            await send_ephemeral_message(
-                interaction,
-                "上一筆動物購買正在處理，請等待畜牧場畫面更新後再操作。",
-            )
+        if not await _town_life_begin_action(self, interaction):
             return
-        self._animal_purchase_started = True
         try:
             result = TOWN_LIFE_DB.buy_animal(self.owner_id, animal_key)
+            _town_life_mark_committed(self)
         except TownLifeError as exc:
-            self._animal_purchase_started = False
+            _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
         animal = ANIMAL_CONFIG[animal_key]
@@ -7349,9 +7162,13 @@ class RanchView(UserOwnedView):
         )
 
     async def _collect(self, interaction: discord.Interaction, animal_key: str) -> None:
+        if not await _town_life_begin_action(self, interaction):
+            return
         try:
             result = TOWN_LIFE_DB.collect_animal_product(self.owner_id, animal_key)
+            _town_life_mark_committed(self)
         except TownLifeError as exc:
+            _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
         notice = (
@@ -7359,9 +7176,13 @@ class RanchView(UserOwnedView):
             f"農牧經驗 +{int(result['exp_gain'])}；"
             f"消耗 {int(result['spirit_cost'])} 精神力。"
         )
+        product_item_key = str(result["product"])
         await interaction.response.edit_message(
-            embed=ranch_embed(self.owner_id, notice=notice, item_key="animal_feed"),
-            attachments=town_life_display_attachments(route_key="ranch", item_key="animal_feed"),
+            embed=ranch_embed(self.owner_id, notice=notice, item_key=product_item_key),
+            attachments=town_life_display_attachments(
+                route_key="ranch",
+                item_key=product_item_key,
+            ),
             view=RanchView(self.owner_id),
         )
 
@@ -7375,9 +7196,13 @@ class RanchView(UserOwnedView):
 
     @discord.ui.button(label="購買飼料 ×10", style=discord.ButtonStyle.secondary, row=1)
     async def buy_feed(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await _town_life_begin_action(self, interaction):
+            return
         try:
             result = TOWN_LIFE_DB.buy_supply(self.owner_id, "animal_feed", 10)
+            _town_life_mark_committed(self)
         except TownLifeError as exc:
+            _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
         notice = f"購買飼料×10，支付 {int(result['cost'])} 麻瓜幣。"
@@ -7418,9 +7243,13 @@ class FishingRouteView(UserOwnedView):
 
     @discord.ui.button(label="河岸釣魚", style=discord.ButtonStyle.primary, row=0)
     async def fish(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await _town_life_begin_action(self, interaction):
+            return
         try:
             result = TOWN_LIFE_DB.fish(self.owner_id)
+            _town_life_mark_committed(self)
         except TownLifeError as exc:
+            _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
         notice = (
@@ -7435,9 +7264,13 @@ class FishingRouteView(UserOwnedView):
 
     @discord.ui.button(label="野外採集", style=discord.ButtonStyle.success, row=0)
     async def forage(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await _town_life_begin_action(self, interaction):
+            return
         try:
             result = TOWN_LIFE_DB.forage(self.owner_id)
+            _town_life_mark_committed(self)
         except TownLifeError as exc:
+            _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
         notice = (
@@ -7497,9 +7330,13 @@ class CrystalRouteView(UserOwnedView):
         super().__init__(owner_id, timeout=900, add_home_button=False)
 
     async def _mine_area(self, interaction: discord.Interaction, area_key: str) -> None:
+        if not await _town_life_begin_action(self, interaction):
+            return
         try:
             result = TOWN_LIFE_DB.mine(self.owner_id, area_key)
+            _town_life_mark_committed(self)
         except TownLifeError as exc:
+            _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
         notice = (
@@ -7653,9 +7490,13 @@ class StoveView(UserOwnedView):
                 TownLifeError("請先選擇一道料理。"),
             )
             return
+        if not await _town_life_begin_action(self, interaction):
+            return
         try:
             result = TOWN_LIFE_DB.cook_food(self.owner_id, recipe_key)
+            _town_life_mark_committed(self)
         except TownLifeError as exc:
+            _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
         notice = (
@@ -7690,13 +7531,17 @@ class StoveView(UserOwnedView):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
+        if not await _town_life_begin_action(self, interaction):
+            return
         try:
             result = TOWN_LIFE_DB.buy_supply(
                 self.owner_id,
                 "stamina_potion",
                 1,
             )
+            _town_life_mark_committed(self)
         except TownLifeError as exc:
+            _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
         notice = (
@@ -8057,10 +7902,14 @@ class InventoryMarketView(UserOwnedView):
             )
 
     async def _eat_selected(self, interaction: discord.Interaction) -> None:
+        if not await _town_life_begin_action(self, interaction):
+            return
         key = self.selected_item_key
         try:
             result = TOWN_LIFE_DB.eat_food(self.owner_id, key)
+            _town_life_mark_committed(self)
         except TownLifeError as exc:
+            _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
         notice = (
@@ -8070,17 +7919,25 @@ class InventoryMarketView(UserOwnedView):
         await self._render(interaction, notice=notice)
 
     async def _use_potion(self, interaction: discord.Interaction) -> None:
+        if not await _town_life_begin_action(self, interaction):
+            return
         try:
             result = TOWN_LIFE_DB.use_stamina_potion(self.owner_id, "stamina_potion")
+            _town_life_mark_committed(self)
         except TownLifeError as exc:
+            _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
         await self._render(interaction, notice=f"使用體力藥水×1｜+{int(result['stamina_restored'])} 體力")
 
     async def _sell(self, interaction: discord.Interaction, category: str, label: str) -> None:
+        if not await _town_life_begin_action(self, interaction):
+            return
         try:
             result = TOWN_LIFE_DB.sell_items(self.owner_id, category)
+            _town_life_mark_committed(self)
         except TownLifeError as exc:
+            _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
         sold_text = "、".join(f"{item_name(key)}×{int(quantity)}" for key, quantity in result["sold"].items())
@@ -8267,147 +8124,6 @@ class TownHubView(UserOwnedView):
             ),
             attachments=[],
             view=PlaceVisibilityPickerView(self.owner_id, places),
-        )
-
-
-async def _send_tutorial(
-    interaction: discord.Interaction,
-    tutorial_id: str,
-) -> None:
-    item = KNOWLEDGE.tutorial_by_id.get(tutorial_id)
-    if not isinstance(item, dict):
-        await interaction.response.send_message(
-            "這份教學目前無法載入。請通知管理員檢查資料檔案。",
-            ephemeral=True,
-        )
-        return
-
-    match = KnowledgeMatch("tutorial", item, item, 100_000)
-    await interaction.response.send_message(
-        embed=monk_embed(
-            f"📖 修士教學｜{item.get('title', '教學')}",
-            render_local_reply(match),
-        ),
-        ephemeral=True,
-    )
-
-
-async def _handle_teaching_question(
-    interaction: discord.Interaction,
-    question: str,
-) -> None:
-    nickname_reply = gorilla_nickname_reply(question)
-    if nickname_reply is not None:
-        await interaction.response.send_message(
-            nickname_reply,
-            ephemeral=True,
-        )
-        return
-
-    refused = boundary_reply(question)
-    if refused is not None:
-        await interaction.response.send_message(
-            refused,
-            ephemeral=True,
-        )
-        return
-
-    local_result = await answer_question(KNOWLEDGE, question)
-    if local_result.match is not None:
-        match = local_result.match
-        await interaction.response.send_message(
-            embed=monk_embed(
-                f"📚 {match.tutorial['title']}",
-                render_local_reply(
-                    match,
-                    concise=True,
-                    gentle=is_emotional_distress(question),
-                ),
-                color=0x3BA55D,
-            ),
-            ephemeral=True,
-        )
-        return
-
-    description = (
-        f"{random_line('unknown_question', '「紀錄本裡沒有這題。」')}\n\n"
-        f"{NO_OFFICIAL_DATA}\n\n"
-        "教學查詢只使用本地正式知識庫，不會呼叫 AI。"
-        "請查看最新公告或詢問管理員。"
-    )
-    await interaction.response.send_message(
-        embed=monk_embed(
-            "📕 修士查不到答案",
-            description,
-            color=0x992D22,
-        ),
-        ephemeral=True,
-    )
-
-
-class TeachingQuestionModal(SafeModal, title="向赤木學長詢問教學"):
-    question = discord.ui.TextInput(
-        label="想查詢的遊戲問題",
-        style=discord.TextStyle.paragraph,
-        placeholder="例如：我剛加入，應該先上課還是探索？",
-        required=True,
-        min_length=2,
-        max_length=300,
-    )
-
-    async def on_submit(
-        self,
-        interaction: discord.Interaction,
-    ) -> None:
-        await _handle_teaching_question(
-            interaction,
-            str(self.question.value),
-        )
-
-
-class TutorialSelect(discord.ui.Select):
-    def __init__(self) -> None:
-        options = [
-            discord.SelectOption(
-                label=str(item["title"])[:100],
-                value=str(item["id"]),
-                description=str(item.get("summary", ""))[:100] or None,
-            )
-            for item in KNOWLEDGE.tutorials[:25]
-        ]
-        super().__init__(
-            placeholder="選擇一項教學主題",
-            min_values=1,
-            max_values=1,
-            options=options,
-            row=0,
-        )
-
-    async def callback(
-        self,
-        interaction: discord.Interaction,
-    ) -> None:
-        await _send_tutorial(interaction, self.values[0])
-
-
-class TeachingHubView(UserOwnedView):
-    def __init__(self, owner_id: int) -> None:
-        super().__init__(owner_id, timeout=900)
-        self.add_item(TutorialSelect())
-
-    @discord.ui.button(
-        label="輸入問題查詢",
-        style=discord.ButtonStyle.primary,
-        emoji="🔎",
-        row=1,
-    )
-    async def ask_question(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await interaction.response.send_modal(
-            TeachingQuestionModal()
         )
 
 
@@ -8812,27 +8528,6 @@ class PlayerPanelHomeView(UserOwnedView):
         )
 
     @discord.ui.button(
-        label="教學",
-        style=discord.ButtonStyle.secondary,
-        emoji="📚",
-        row=1,
-    )
-    async def teaching(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await interaction.response.edit_message(
-            embed=monk_embed(
-                "📚 赤木學長教學櫃臺",
-                "從選單挑選正式教學，"
-                "或按下「輸入問題查詢」搜尋本地 FAQ。",
-                color=0x3BA55D,
-            ),
-            view=TeachingHubView(self.owner_id),
-        )
-
-    @discord.ui.button(
         label="告解",
         style=discord.ButtonStyle.secondary,
         emoji="🕯️",
@@ -8897,7 +8592,10 @@ async def open_player_panel_page(
             discord.Forbidden,
             discord.HTTPException,
         ):
-            pass
+            logger.debug(
+                "新面板已建立，但無法移除舊面板操作元件。",
+                exc_info=True,
+            )
 
     return message
 
@@ -9104,8 +8802,7 @@ async def monk_status(
     await interaction.response.send_message(
         "修士目前在線。\n\n"
         "玩家操作方式：**`/學生資料`、`/城下町`、`/今日穿搭推薦`**\n"
-        "公開斜線指令數量：**5**\n"
-        "AI 教學：**永久停用**\n"
+        "公開斜線指令數量：**6**\n"
         f"AI 告解：**{confession_ai_status}**\n"
         f"AI 神諭：**{oracle_ai_status}**\n"
         "學籍資料庫：**已啟用**\n"
@@ -9121,7 +8818,7 @@ async def on_app_command_error(
 ) -> None:
     if isinstance(error, WrongMonkChannel):
         message = (
-            f"這裡不是修士教學頻道。請到 <#{SETTINGS.monk_channel_id}> 使用指令。"
+            f"這裡不是修士 Bot 的指定頻道。請到 <#{SETTINGS.monk_channel_id}> 使用指令。"
         )
     elif isinstance(error, app_commands.CommandOnCooldown):
         seconds = max(1, int(error.retry_after))

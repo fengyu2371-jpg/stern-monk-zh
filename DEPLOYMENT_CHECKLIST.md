@@ -14,7 +14,7 @@
 
 - [ ] Railway 專案根目錄可直接看到 `main.py`、`town_life.py`、`requirements.txt`、`railway.toml`、`data/`、`assets/`。
 - [ ] Linux 大小寫完全相符：`assets/town_life`、`assets/town_life/items` 與程式內檔名一致。
-- [ ] `data/dialogue.json`、`data/tutorials_zh_tw.json`、`data/faq_zh_tw.json` 均存在且為 UTF-8 JSON。
+- [ ] `data/dialogue.json` 存在且為 UTF-8 JSON；舊神父 Bot 的教學／FAQ 檔案不應再存在。
 - [ ] 執行 `python -m py_compile main.py town_life.py`。
 - [ ] 執行 `pip install -r requirements.txt`，確認安裝 `discord.py>=2.5,<3.0` 與 `openai>=1.0,<3.0`。
 - [ ] 設定 `MONK_TOKEN`、`MONK_CHANNEL_ID`、`MONK_DB_PATH`；需要 AI 時再設定 `OPENAI_API_KEY` 與相應開關。
@@ -30,6 +30,7 @@
 - [ ] 舊面板計時器到期時，新面板不得被關閉。
 - [ ] 在表單開啟後另建新面板，再送出舊表單：應顯示未寫入提示，資料不可變更。
 - [ ] 故意觸發測試環境 callback 例外：玩家收到 ephemeral 錯誤，Railway log 有 traceback。
+- [ ] 快速連點任一交易按鈕：同一張面板只允許第一筆交易，第二筆顯示「上一筆操作正在處理」。
 
 ## 4. 城下町入口
 
@@ -63,7 +64,7 @@
 ## 7. 每日重置
 
 - [ ] 在 staging 使用可控制時間的資料庫副本測試台灣時間 23:59 → 00:00。
-- [ ] 跨日後體力、精神力、每日休息次數與料理每日回體額度重置。
+- [ ] 跨日後體力、每日休息次數與料理每日回體額度重置；精神力保留跨日前數值。
 - [ ] 分別由 `/我的`、`/學生資料`、`/城下町` 觸發跨日檢查。
 - [ ] 同一天重複開面板不會重複贈送體力或重置已使用次數。
 

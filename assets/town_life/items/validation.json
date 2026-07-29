@@ -1,5 +1,5 @@
 {
-  "count": 28,
+  "count": 37,
   "failures": [],
   "files": [
     {
@@ -220,6 +220,78 @@
     },
     {
       "filename": "moon_trout_steak.png",
+      "size": [
+        128,
+        128
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "filename": "berry_plate.png",
+      "size": [
+        128,
+        128
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "filename": "roasted_carrot.png",
+      "size": [
+        128,
+        128
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "filename": "boiled_egg.png",
+      "size": [
+        128,
+        128
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "filename": "wheat_bread.png",
+      "size": [
+        128,
+        128
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "filename": "herb_soup.png",
+      "size": [
+        128,
+        128
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "filename": "milk_egg_stew.png",
+      "size": [
+        128,
+        128
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "filename": "silver_carp_steak.png",
+      "size": [
+        128,
+        128
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "filename": "moon_trout_platter.png",
+      "size": [
+        128,
+        128
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "filename": "stamina_potion.png",
       "size": [
         128,
         128

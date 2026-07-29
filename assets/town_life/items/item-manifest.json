@@ -117,6 +117,42 @@
     {
       "filename": "moon_trout_steak.png",
       "name_zh_tw": "香煎月光鱒"
+    },
+    {
+      "filename": "berry_plate.png",
+      "name_zh_tw": "野莓果盤"
+    },
+    {
+      "filename": "roasted_carrot.png",
+      "name_zh_tw": "烤胡蘿蔔"
+    },
+    {
+      "filename": "boiled_egg.png",
+      "name_zh_tw": "水煮蛋"
+    },
+    {
+      "filename": "wheat_bread.png",
+      "name_zh_tw": "小麥麵包"
+    },
+    {
+      "filename": "herb_soup.png",
+      "name_zh_tw": "野菜湯"
+    },
+    {
+      "filename": "milk_egg_stew.png",
+      "name_zh_tw": "牛奶燉蛋"
+    },
+    {
+      "filename": "silver_carp_steak.png",
+      "name_zh_tw": "香煎銀鱗鯉"
+    },
+    {
+      "filename": "moon_trout_platter.png",
+      "name_zh_tw": "月光鱒套餐"
+    },
+    {
+      "filename": "stamina_potion.png",
+      "name_zh_tw": "體力藥水"
     }
   ]
 }

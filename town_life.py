@@ -623,15 +623,14 @@ class TownLifeDatabase:
         if updated_at.date() < current_time.date():
             maximum = int(row["max_stamina"])
             now = current_time.isoformat(timespec="seconds")
-            max_spirit = int(row["max_spirit"])
             conn.execute(
                 """
                 UPDATE town_life_players
-                SET stamina = ?, spirit = ?, stamina_updated_at = ?,
+                SET stamina = ?, stamina_updated_at = ?,
                     last_rest_date = '', updated_at = ?
                 WHERE user_id = ?
                 """,
-                (maximum, max_spirit, now, now, uid),
+                (maximum, now, now, uid),
             )
             row = conn.execute(
                 "SELECT * FROM town_life_players WHERE user_id = ?",
@@ -1562,15 +1561,3 @@ class TownLifeDatabase:
             )
             conn.commit()
         return {"sold": sold, "protected": protected, "coins": total}
-
-    def daily_rest(self, user_id: int) -> dict[str, Any]:
-        # 保留舊方法名稱，避免舊按鈕或舊部署在更新交界時發生屬性錯誤。
-        # 新版已改成每日凌晨 00:00 自動重置，不再提供額外休息回體。
-        with closing(self.connect()) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            player = self._refresh_stamina(conn, user_id)
-            conn.commit()
-        raise TownLifeError(
-            f"目前體力為 {int(player['stamina'])}／{int(player['max_stamina'])}。"
-            "城下町體力會在每天凌晨 00:00 自動重置。"
-        )
