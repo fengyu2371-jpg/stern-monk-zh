@@ -6448,7 +6448,8 @@ def fishing_embed(user_id: int, *, notice: str = "", item_key: str = "") -> disc
         f"釣具 Lv.{int(snapshot['tools'].get('fishing_rod', 0))}\n"
         f"**體力** {int(snapshot['player']['stamina'])}／{int(snapshot['player']['max_stamina'])}｜"
         f"**精神力** {int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}\n\n"
-        "釣魚需要釣具；野外採集不需要工具。"
+        "釣魚需要釣具；野外採集不需要工具。\n"
+        "可一次執行 1／5／10 次，或選擇最多消耗 100 體力。"
     )
     if notice:
         description = f"**本次結果**｜{notice}\n\n{description}"
@@ -6481,7 +6482,8 @@ def mining_embed(user_id: int, *, notice: str = "", item_key: str = "") -> disco
         f"**精神力** {int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}\n"
         f"原礦 {int(inventory.get('raw_crystal', 0))}｜鐵礦 {int(inventory.get('iron_ore', 0))}\n\n"
         + "\n".join(area_lines)
-        + "\n\nLv.2 起可在工坊精煉魔法水晶。"
+        + "\n\n可一次挖掘 1／3／5 次，或選擇最多消耗 100 體力。"
+        "\nLv.2 起可在工坊精煉魔法水晶。"
     )
     if notice:
         description = f"**本次結果**\n{notice}\n\n{description}"
@@ -6729,6 +6731,34 @@ def _town_life_mark_committed(
     )
     if isinstance(view, UserOwnedView):
         view.mark_town_life_action_committed()
+
+
+def _town_life_batch_notice(action_name: str, result: dict[str, Any]) -> str:
+    rewards = {
+        str(item_key): int(quantity)
+        for item_key, quantity in dict(result.get("rewards") or {}).items()
+        if int(quantity) > 0
+    }
+    if not rewards and result.get("item_key"):
+        rewards[str(result["item_key"])] = int(result.get("quantity") or 0)
+    reward_text = "、".join(
+        f"{item_name(item_key)}×{quantity}"
+        for item_key, quantity in rewards.items()
+    )
+    completed = int(result.get("attempts_completed") or 1)
+    requested = int(result.get("attempts_requested") or completed)
+    budget = result.get("stamina_budget")
+    if budget is not None:
+        attempt_text = f"{completed} 次（最多 {int(budget)} 體力）"
+    elif completed < requested:
+        attempt_text = f"{completed} 次（原選 {requested} 次）"
+    else:
+        attempt_text = f"{completed} 次"
+    return (
+        f"{action_name} {attempt_text}｜{reward_text or '沒有取得物品'}｜"
+        f"-{int(result['stamina_cost'])} 體力／"
+        f"-{int(result['spirit_cost'])} 精神力"
+    )
 
 
 class SeedPurchaseSelect(discord.ui.Select):
@@ -7534,49 +7564,150 @@ class FishingRouteView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
         super().__init__(owner_id, timeout=900, add_home_button=False)
 
-    @discord.ui.button(label="河岸釣魚", style=discord.ButtonStyle.primary, row=0)
-    async def fish(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def _run_fishing_action(
+        self,
+        interaction: discord.Interaction,
+        *,
+        action: str,
+        attempts: int,
+        stamina_budget: int | None = None,
+    ) -> None:
         if not await _town_life_begin_action(self, interaction):
             return
         try:
-            result = TOWN_LIFE_DB.fish(self.owner_id)
+            if action == "fish":
+                result = TOWN_LIFE_DB.fish(
+                    self.owner_id,
+                    attempts,
+                    stamina_budget=stamina_budget,
+                )
+                action_name = "河岸釣魚"
+            else:
+                result = TOWN_LIFE_DB.forage(
+                    self.owner_id,
+                    attempts,
+                    stamina_budget=stamina_budget,
+                )
+                action_name = "野外採集"
             _town_life_mark_committed(self)
         except TownLifeError as exc:
             _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
-        notice = (
-            f"{item_name(str(result['item_key']))}×{int(result['quantity'])}｜"
-            f"-{int(result['stamina_cost'])} 體力／-{int(result['spirit_cost'])} 精神力"
-        )
+        notice = _town_life_batch_notice(action_name, result)
+        item_key = str(result["item_key"])
         await interaction.response.edit_message(
-            embed=fishing_embed(self.owner_id, notice=notice, item_key=str(result["item_key"])),
-            attachments=town_life_display_attachments(route_key="fishing", item_key=str(result["item_key"])),
+            embed=fishing_embed(
+                self.owner_id,
+                notice=notice,
+                item_key=item_key,
+            ),
+            attachments=town_life_display_attachments(
+                route_key="fishing",
+                item_key=item_key,
+            ),
             view=FishingRouteView(self.owner_id),
         )
 
-    @discord.ui.button(label="野外採集", style=discord.ButtonStyle.success, row=0)
-    async def forage(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if not await _town_life_begin_action(self, interaction):
-            return
-        try:
-            result = TOWN_LIFE_DB.forage(self.owner_id)
-            _town_life_mark_committed(self)
-        except TownLifeError as exc:
-            _town_life_release_action(self)
-            await _town_life_send_error(interaction, exc)
-            return
-        notice = (
-            f"{item_name(str(result['item_key']))}×{int(result['quantity'])}｜"
-            f"-{int(result['stamina_cost'])} 體力／-{int(result['spirit_cost'])} 精神力"
-        )
-        await interaction.response.edit_message(
-            embed=fishing_embed(self.owner_id, notice=notice, item_key=str(result["item_key"])),
-            attachments=town_life_display_attachments(route_key="fishing", item_key=str(result["item_key"])),
-            view=FishingRouteView(self.owner_id),
+    @discord.ui.button(label="釣魚×1", style=discord.ButtonStyle.primary, row=0)
+    async def fish_once(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._run_fishing_action(
+            interaction,
+            action="fish",
+            attempts=1,
         )
 
-    @discord.ui.button(label="河岸工坊", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="釣魚×5", style=discord.ButtonStyle.primary, row=0)
+    async def fish_five(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._run_fishing_action(
+            interaction,
+            action="fish",
+            attempts=5,
+        )
+
+    @discord.ui.button(label="釣魚×10", style=discord.ButtonStyle.primary, row=0)
+    async def fish_ten(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._run_fishing_action(
+            interaction,
+            action="fish",
+            attempts=10,
+        )
+
+    @discord.ui.button(label="釣魚｜100體", style=discord.ButtonStyle.primary, row=0)
+    async def fish_budget(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._run_fishing_action(
+            interaction,
+            action="fish",
+            attempts=100,
+            stamina_budget=100,
+        )
+
+    @discord.ui.button(label="採集×1", style=discord.ButtonStyle.success, row=1)
+    async def forage_once(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._run_fishing_action(
+            interaction,
+            action="forage",
+            attempts=1,
+        )
+
+    @discord.ui.button(label="採集×5", style=discord.ButtonStyle.success, row=1)
+    async def forage_five(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._run_fishing_action(
+            interaction,
+            action="forage",
+            attempts=5,
+        )
+
+    @discord.ui.button(label="採集×10", style=discord.ButtonStyle.success, row=1)
+    async def forage_ten(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._run_fishing_action(
+            interaction,
+            action="forage",
+            attempts=10,
+        )
+
+    @discord.ui.button(label="採集｜100體", style=discord.ButtonStyle.success, row=1)
+    async def forage_budget(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._run_fishing_action(
+            interaction,
+            action="forage",
+            attempts=100,
+            stamina_budget=100,
+        )
+
+    @discord.ui.button(label="河岸工坊", style=discord.ButtonStyle.primary, row=2)
     async def workshop(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.edit_message(
             embed=workshop_embed(self.owner_id, "fishing"),
@@ -7584,7 +7715,7 @@ class FishingRouteView(UserOwnedView):
             view=WorkshopView(self.owner_id, "fishing"),
         )
 
-    @discord.ui.button(label="背包與出售", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="背包與出售", style=discord.ButtonStyle.secondary, row=3)
     async def market(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.defer()
         snapshot = TOWN_LIFE_DB.get_snapshot(self.owner_id)
@@ -7609,7 +7740,7 @@ class FishingRouteView(UserOwnedView):
             ),
         )
 
-    @discord.ui.button(label="返回生活職業", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="返回生活職業", style=discord.ButtonStyle.secondary, row=3)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.edit_message(
             embed=town_life_home_embed(self.owner_id),
@@ -7622,51 +7753,155 @@ class CrystalRouteView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
         super().__init__(owner_id, timeout=900, add_home_button=False)
 
-    async def _mine_area(self, interaction: discord.Interaction, area_key: str) -> None:
+    async def _mine_area(
+        self,
+        interaction: discord.Interaction,
+        area_key: str,
+        attempts: int,
+        *,
+        stamina_budget: int | None = None,
+    ) -> None:
         if not await _town_life_begin_action(self, interaction):
             return
         try:
-            result = TOWN_LIFE_DB.mine(self.owner_id, area_key)
+            result = TOWN_LIFE_DB.mine(
+                self.owner_id,
+                area_key,
+                attempts,
+                stamina_budget=stamina_budget,
+            )
             _town_life_mark_committed(self)
         except TownLifeError as exc:
             _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
-        notice = (
-            f"{result['area_name']}｜{item_name(str(result['item_key']))}×{int(result['quantity'])}｜"
-            f"-{int(result['stamina_cost'])} 體力／-{int(result['spirit_cost'])} 精神力"
-        )
+        notice = _town_life_batch_notice(str(result["area_name"]), result)
+        item_key = str(result["item_key"])
         await interaction.response.edit_message(
-            embed=mining_embed(self.owner_id, notice=notice, item_key=str(result["item_key"])),
-            attachments=town_life_display_attachments(route_key="crystal", item_key=str(result["item_key"])),
+            embed=mining_embed(
+                self.owner_id,
+                notice=notice,
+                item_key=item_key,
+            ),
+            attachments=town_life_display_attachments(
+                route_key="crystal",
+                item_key=item_key,
+            ),
             view=CrystalRouteView(self.owner_id),
         )
 
-    @discord.ui.button(label="外圍礦道", style=discord.ButtonStyle.primary, row=0)
-    async def outer_tunnel(
+    @discord.ui.button(label="外圍×1", style=discord.ButtonStyle.primary, row=0)
+    async def outer_tunnel_once(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        await self._mine_area(interaction, "outer_tunnel")
+        await self._mine_area(interaction, "outer_tunnel", 1)
 
-    @discord.ui.button(label="深層鐵脈", style=discord.ButtonStyle.primary, row=0)
-    async def iron_depths(
+    @discord.ui.button(label="外圍×3", style=discord.ButtonStyle.primary, row=0)
+    async def outer_tunnel_three(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        await self._mine_area(interaction, "iron_depths")
+        await self._mine_area(interaction, "outer_tunnel", 3)
 
-    @discord.ui.button(label="魔晶洞窟", style=discord.ButtonStyle.primary, row=0)
-    async def crystal_cavern(
+    @discord.ui.button(label="外圍×5", style=discord.ButtonStyle.primary, row=0)
+    async def outer_tunnel_five(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        await self._mine_area(interaction, "crystal_cavern")
+        await self._mine_area(interaction, "outer_tunnel", 5)
 
-    @discord.ui.button(label="礦坑工坊", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="外圍｜100體", style=discord.ButtonStyle.primary, row=0)
+    async def outer_tunnel_budget(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._mine_area(
+            interaction,
+            "outer_tunnel",
+            100,
+            stamina_budget=100,
+        )
+
+    @discord.ui.button(label="深層×1", style=discord.ButtonStyle.primary, row=1)
+    async def iron_depths_once(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._mine_area(interaction, "iron_depths", 1)
+
+    @discord.ui.button(label="深層×3", style=discord.ButtonStyle.primary, row=1)
+    async def iron_depths_three(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._mine_area(interaction, "iron_depths", 3)
+
+    @discord.ui.button(label="深層×5", style=discord.ButtonStyle.primary, row=1)
+    async def iron_depths_five(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._mine_area(interaction, "iron_depths", 5)
+
+    @discord.ui.button(label="深層｜100體", style=discord.ButtonStyle.primary, row=1)
+    async def iron_depths_budget(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._mine_area(
+            interaction,
+            "iron_depths",
+            100,
+            stamina_budget=100,
+        )
+
+    @discord.ui.button(label="洞窟×1", style=discord.ButtonStyle.primary, row=2)
+    async def crystal_cavern_once(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._mine_area(interaction, "crystal_cavern", 1)
+
+    @discord.ui.button(label="洞窟×3", style=discord.ButtonStyle.primary, row=2)
+    async def crystal_cavern_three(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._mine_area(interaction, "crystal_cavern", 3)
+
+    @discord.ui.button(label="洞窟×5", style=discord.ButtonStyle.primary, row=2)
+    async def crystal_cavern_five(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._mine_area(interaction, "crystal_cavern", 5)
+
+    @discord.ui.button(label="洞窟｜100體", style=discord.ButtonStyle.primary, row=2)
+    async def crystal_cavern_budget(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._mine_area(
+            interaction,
+            "crystal_cavern",
+            100,
+            stamina_budget=100,
+        )
+
+    @discord.ui.button(label="礦坑工坊", style=discord.ButtonStyle.success, row=3)
     async def workshop(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.edit_message(
             embed=workshop_embed(self.owner_id, "crystal"),
@@ -7674,7 +7909,7 @@ class CrystalRouteView(UserOwnedView):
             view=WorkshopView(self.owner_id, "crystal"),
         )
 
-    @discord.ui.button(label="背包與出售", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="背包與出售", style=discord.ButtonStyle.secondary, row=3)
     async def market(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.defer()
         snapshot = TOWN_LIFE_DB.get_snapshot(self.owner_id)
@@ -7699,7 +7934,7 @@ class CrystalRouteView(UserOwnedView):
             ),
         )
 
-    @discord.ui.button(label="返回生活職業", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="返回生活職業", style=discord.ButtonStyle.secondary, row=4)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.edit_message(
             embed=town_life_home_embed(self.owner_id),
