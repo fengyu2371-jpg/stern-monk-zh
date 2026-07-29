@@ -2073,6 +2073,7 @@ class SafeModal(discord.ui.Modal):
 
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
+BUILD_VERSION = "2026-07-30-panel-lock-v3"
 
 
 def locked_operation_embed(
@@ -2246,6 +2247,52 @@ def activate_player_panel(
 
 def current_player_panel(owner_id: int) -> PlayerPanelSession | None:
     return ACTIVE_PLAYER_PANELS.get(int(owner_id))
+
+
+async def lock_replaced_player_panel(
+    message: discord.Message,
+    *,
+    owner_name: str,
+) -> bool:
+    """Replace an old panel with a visible lock screen.
+
+    A transient Discord HTTP failure is retried once. The newer panel remains
+    authoritative even when the old message was deleted or cannot be edited.
+    """
+    for attempt in range(2):
+        try:
+            await message.edit(
+                content=None,
+                embed=locked_operation_embed(
+                    owner_name=owner_name,
+                    replaced=True,
+                ),
+                attachments=[],
+                view=None,
+            )
+            logger.info("舊玩家面板已鎖定：message_id=%s", message.id)
+            return True
+        except discord.NotFound:
+            logger.info("舊玩家面板已不存在：message_id=%s", message.id)
+            return False
+        except discord.Forbidden:
+            logger.warning(
+                "缺少權限，無法鎖定舊玩家面板：message_id=%s",
+                message.id,
+            )
+            return False
+        except discord.HTTPException:
+            if attempt == 0:
+                await asyncio.sleep(0.5)
+                continue
+            logger.warning(
+                "重試後仍無法鎖定舊玩家面板：message_id=%s",
+                message.id,
+                exc_info=True,
+            )
+            return False
+
+    return False
 
 
 async def fetch_saved_player_panel(
@@ -2872,6 +2919,7 @@ class MonkClient(discord.Client):
         ACADEMY_DB.initialize()
         TOWN_LIFE_DB.initialize()
         logger.info("修士學籍與城下町生活資料庫已初始化：%s", SETTINGS.monk_db_path)
+        logger.info("修士程式版本：%s", BUILD_VERSION)
 
         # 玩家功能改由 /學生資料 或 /城下町 開啟，不再註冊公共入口。
         # 舊版已貼出的固定面板不會在重啟後恢復操作。
@@ -9179,9 +9227,26 @@ async def open_player_panel_page(
     except Exception:
         logger.exception("城下町跨日重置檢查失敗：%s", interaction.user.id)
 
-    # 先記住舊面板，但不要立刻清除按鈕。
+    # 優先使用目前程序記憶中的面板；若 Bot 剛重啟，再從資料庫尋找。
     # 必須等新訊息建立完成並確認訊息 ID 不同，才能安全關閉舊面板。
-    previous_message = await fetch_saved_player_panel(interaction.user.id)
+    previous_session = current_player_panel(interaction.user.id)
+    if previous_session is not None:
+        previous_message = previous_session.message
+        logger.info(
+            "從目前面板工作階段取得舊面板：user_id=%s message_id=%s",
+            interaction.user.id,
+            previous_message.id,
+        )
+    else:
+        previous_message = await fetch_saved_player_panel(
+            interaction.user.id
+        )
+        if previous_message is not None:
+            logger.info(
+                "從資料庫紀錄取得舊面板：user_id=%s message_id=%s",
+                interaction.user.id,
+                previous_message.id,
+            )
 
     message = await interaction.edit_original_response(
         embed=embed,
@@ -9207,25 +9272,10 @@ async def open_player_panel_page(
         previous_message is not None
         and previous_message.id != message.id
     ):
-        try:
-            await previous_message.edit(
-                content=None,
-                embed=locked_operation_embed(
-                    owner_name=interaction.user.display_name,
-                    replaced=True,
-                ),
-                attachments=[],
-                view=None,
-            )
-        except (
-            discord.NotFound,
-            discord.Forbidden,
-            discord.HTTPException,
-        ):
-            logger.debug(
-                "新面板已建立，但無法將舊面板切換成鎖定畫面。",
-                exc_info=True,
-            )
+        await lock_replaced_player_panel(
+            previous_message,
+            owner_name=interaction.user.display_name,
+        )
 
     return message
 
@@ -9422,6 +9472,7 @@ async def monk_status(
     )
     await interaction.response.send_message(
         "修士目前在線。\n\n"
+        f"程式版本：**{BUILD_VERSION}**\n"
         "玩家操作方式：**`/學生資料`、`/城下町`、`/今日穿搭推薦`**\n"
         f"公開斜線指令數量：**{command_count}**\n"
         f"AI 告解：**{confession_ai_status}**\n"

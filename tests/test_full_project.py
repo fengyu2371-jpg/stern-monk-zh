@@ -909,6 +909,58 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
         self.assertIn("舊面板已鎖定", locked["embed"].title)
         self.assertIn("已開啟新的操作面板", locked["embed"].description)
 
+    async def test_new_panel_prefers_active_session_when_db_lookup_is_unavailable(
+        self,
+    ) -> None:
+        previous_message = FakeMessage(message_id=333)
+        previous_session = main.PlayerPanelSession(
+            owner_id=self.user_id,
+            owner_name="測試玩家",
+            message=previous_message,
+        )
+        main.ACTIVE_PLAYER_PANELS[self.user_id] = previous_session
+        new_message = FakeMessage(message_id=444)
+        interaction = FakeInteraction(
+            user_id=self.user_id,
+            original_message=new_message,
+        )
+
+        try:
+            with (
+                mock.patch.object(
+                    main,
+                    "fetch_saved_player_panel",
+                    new=mock.AsyncMock(
+                        side_effect=AssertionError(
+                            "有目前工作階段時不應依賴資料庫查詢"
+                        )
+                    ),
+                ) as fetch_saved,
+                mock.patch.object(
+                    main.ACADEMY_DB,
+                    "save_player_panel",
+                ),
+                mock.patch.object(
+                    main,
+                    "activate_player_panel",
+                ),
+            ):
+                await main.open_player_panel_page(
+                    interaction,
+                    embed=main.monk_embed("新面板", "測試"),
+                    view=main.PlayerPanelHomeView(self.user_id),
+                )
+
+            fetch_saved.assert_not_awaited()
+            self.assertEqual(len(previous_message.edits), 1)
+            self.assertIsNone(previous_message.edits[0]["view"])
+            self.assertIn(
+                "舊面板已鎖定",
+                previous_message.edits[0]["embed"].title,
+            )
+        finally:
+            main.ACTIVE_PLAYER_PANELS.pop(self.user_id, None)
+
     async def test_failed_new_panel_creation_does_not_lock_previous_panel(self) -> None:
         previous_message = FakeMessage(message_id=111)
         interaction = FakeInteraction(user_id=self.user_id)
