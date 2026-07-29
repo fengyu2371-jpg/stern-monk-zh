@@ -218,6 +218,45 @@ class ProjectStaticTests(DatabaseCase):
             for child in view.children:
                 self.assertIsNotNone(child.callback)
 
+    def test_batch_action_buttons_are_available(self) -> None:
+        fishing_labels = {
+            str(getattr(child, "label", ""))
+            for child in main.FishingRouteView(self.user_id).children
+        }
+        self.assertTrue(
+            {
+                "釣魚×1",
+                "釣魚×5",
+                "釣魚×10",
+                "釣魚｜100體",
+                "採集×1",
+                "採集×5",
+                "採集×10",
+                "採集｜100體",
+            }.issubset(fishing_labels)
+        )
+
+        mining_labels = {
+            str(getattr(child, "label", ""))
+            for child in main.CrystalRouteView(self.user_id).children
+        }
+        self.assertTrue(
+            {
+                "外圍×1",
+                "外圍×3",
+                "外圍×5",
+                "外圍｜100體",
+                "深層×1",
+                "深層×3",
+                "深層×5",
+                "深層｜100體",
+                "洞窟×1",
+                "洞窟×3",
+                "洞窟×5",
+                "洞窟｜100體",
+            }.issubset(mining_labels)
+        )
+
     def test_startup_hook_without_discord_network(self) -> None:
         original_academy = main.ACADEMY_DB
         main.ACADEMY_DB = main.AcademyDatabase(Path(self.temp_dir.name) / "startup.db")
@@ -573,6 +612,115 @@ class PlayerAndTransactionTests(DatabaseCase):
         self.set_tool("pickaxe", 4)
         self.set_career("crystal", 3)
         self.assertIn(self.db.mine(self.user_id, "crystal_cavern")["item_key"], ITEM_CONFIG)
+
+    def test_forage_batch_aggregates_rewards_and_costs(self) -> None:
+        self.set_player(stamina=1000, stamina_updated_at=town_life.now_iso())
+        with (
+            mock.patch("town_life.random.choices", return_value=["wild_berry"]),
+            mock.patch("town_life.random.randint", return_value=2),
+        ):
+            result = self.db.forage(self.user_id, 10)
+
+        snapshot = self.db.get_snapshot(self.user_id)
+        self.assertEqual(int(result["attempts_completed"]), 10)
+        self.assertEqual(int(result["stamina_cost"]), 60)
+        self.assertEqual(result["rewards"], {"wild_berry": 20})
+        self.assertEqual(int(snapshot["inventory"]["wild_berry"]), 20)
+        self.assertEqual(int(snapshot["player"]["stamina"]), 940)
+        self.assertEqual(int(snapshot["careers"]["fishing"]["exp"]), 50)
+
+    def test_batch_partially_completes_when_stamina_is_low(self) -> None:
+        self.set_player(stamina=17, stamina_updated_at=town_life.now_iso())
+        with (
+            mock.patch("town_life.random.choices", return_value=["branch"]),
+            mock.patch("town_life.random.randint", return_value=1),
+        ):
+            result = self.db.forage(self.user_id, 10)
+
+        snapshot = self.db.get_snapshot(self.user_id)
+        self.assertEqual(int(result["attempts_requested"]), 10)
+        self.assertEqual(int(result["attempts_completed"]), 2)
+        self.assertEqual(int(result["stamina_cost"]), 12)
+        self.assertEqual(int(snapshot["player"]["stamina"]), 5)
+        self.assertEqual(int(snapshot["inventory"]["branch"]), 2)
+
+    def test_hundred_stamina_budget_never_overspends(self) -> None:
+        self.set_player(stamina=1000, stamina_updated_at=town_life.now_iso())
+        with (
+            mock.patch("town_life.random.choices", return_value=["wild_herb"]),
+            mock.patch("town_life.random.randint", return_value=1),
+        ):
+            result = self.db.forage(
+                self.user_id,
+                100,
+                stamina_budget=100,
+            )
+
+        self.assertEqual(int(result["attempts_completed"]), 16)
+        self.assertEqual(int(result["stamina_cost"]), 96)
+        self.assertLessEqual(int(result["stamina_cost"]), 100)
+        self.assertEqual(result["stamina_budget"], 100)
+
+    def test_fishing_batch_keeps_individual_drop_and_exp_rules(self) -> None:
+        self.set_player(stamina=1000, stamina_updated_at=town_life.now_iso())
+        self.set_tool("fishing_rod", 1)
+        drops = [
+            ["river_fish"],
+            ["old_boot"],
+            ["silver_carp"],
+            ["river_fish"],
+            ["old_boot"],
+        ]
+        with mock.patch("town_life.random.choices", side_effect=drops):
+            result = self.db.fish(self.user_id, 5)
+
+        snapshot = self.db.get_snapshot(self.user_id)
+        self.assertEqual(
+            result["rewards"],
+            {"river_fish": 2, "old_boot": 2, "silver_carp": 1},
+        )
+        self.assertEqual(int(result["stamina_cost"]), 45)
+        self.assertEqual(int(snapshot["careers"]["fishing"]["exp"]), 32)
+
+    def test_mining_batch_is_limited_by_spirit(self) -> None:
+        self.set_player(
+            stamina=1000,
+            spirit=5,
+            stamina_updated_at=town_life.now_iso(),
+        )
+        self.set_tool("pickaxe", 4)
+        self.set_career("crystal", 3)
+        with (
+            mock.patch("town_life.random.choices", return_value=["iron_ore"]),
+            mock.patch("town_life.random.random", return_value=1.0),
+        ):
+            result = self.db.mine(self.user_id, "iron_depths", 5)
+
+        snapshot = self.db.get_snapshot(self.user_id)
+        self.assertEqual(int(result["attempts_completed"]), 2)
+        self.assertEqual(int(result["spirit_cost"]), 4)
+        self.assertEqual(int(snapshot["player"]["spirit"]), 1)
+        self.assertEqual(int(snapshot["inventory"]["iron_ore"]), 2)
+
+    def test_batch_database_failure_rolls_back_everything(self) -> None:
+        self.set_player(stamina=1000, stamina_updated_at=town_life.now_iso())
+        before = self.db.get_snapshot(self.user_id)
+        with (
+            mock.patch("town_life.random.choices", return_value=["wild_berry"]),
+            mock.patch("town_life.random.randint", return_value=2),
+            mock.patch.object(
+                self.db,
+                "_add_career_exp",
+                side_effect=sqlite3.OperationalError("forced batch failure"),
+            ),
+        ):
+            with self.assertRaises(sqlite3.OperationalError):
+                self.db.forage(self.user_id, 10)
+
+        after = self.db.get_snapshot(self.user_id)
+        self.assertEqual(after["player"]["stamina"], before["player"]["stamina"])
+        self.assertEqual(after["inventory"], before["inventory"])
+        self.assertEqual(after["careers"], before["careers"])
 
     def test_refine_missing_and_success(self) -> None:
         self.set_career("crystal", 2)
