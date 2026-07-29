@@ -19,6 +19,7 @@ MAX_STAMINA = 1000
 INITIAL_SPIRIT = 100
 MAX_SPIRIT = 100
 MAX_DAILY_FOOD_STAMINA = 600
+STAMINA_RECOVERY_PER_MINUTE = 1
 TOOL_UPGRADE_SPIRIT_COSTS = (0, 0, 3, 5, 8)
 
 
@@ -616,8 +617,8 @@ class TownLifeDatabase:
         if row is None:
             raise TownLifeError("找不到城下町生活資料。")
 
-        # 城下町體力採每日制：台北時間跨過凌晨 00:00 後，
-        # 玩家第一次開啟頁面或進行操作時，自動恢復到當前體力上限。
+        # 體力採離線結算：跨日先恢復至上限；同一天每完整一分鐘
+        # 恢復一點。到達上限時會丟棄多餘時間，避免滿體囤積恢復量。
         current_time = taipei_now()
         updated_at = parse_time(str(row["stamina_updated_at"]))
         if updated_at.date() < current_time.date():
@@ -636,6 +637,40 @@ class TownLifeDatabase:
                 "SELECT * FROM town_life_players WHERE user_id = ?",
                 (uid,),
             ).fetchone()
+        elif updated_at <= current_time:
+            elapsed_minutes = int(
+                (current_time - updated_at).total_seconds() // 60
+            )
+            if elapsed_minutes > 0:
+                stamina = int(row["stamina"])
+                maximum = int(row["max_stamina"])
+                recovered = min(
+                    max(0, maximum - stamina),
+                    elapsed_minutes * STAMINA_RECOVERY_PER_MINUTE,
+                )
+                refreshed_stamina = stamina + recovered
+                if refreshed_stamina >= maximum:
+                    refreshed_at = current_time
+                else:
+                    refreshed_at = updated_at + timedelta(minutes=elapsed_minutes)
+                now = current_time.isoformat(timespec="seconds")
+                conn.execute(
+                    """
+                    UPDATE town_life_players
+                    SET stamina = ?, stamina_updated_at = ?, updated_at = ?
+                    WHERE user_id = ?
+                    """,
+                    (
+                        refreshed_stamina,
+                        refreshed_at.isoformat(timespec="seconds"),
+                        now,
+                        uid,
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM town_life_players WHERE user_id = ?",
+                    (uid,),
+                ).fetchone()
         return row
 
     def _spend_stamina(self, conn: sqlite3.Connection, user_id: int, amount: int) -> int:
@@ -1509,8 +1544,12 @@ class TownLifeDatabase:
             restored = min(int(potion["stamina_restore"]), maximum - current)
             now = now_iso()
             conn.execute(
-                "UPDATE town_life_players SET stamina = ?, updated_at = ? WHERE user_id = ?",
-                (current + restored, now, str(user_id)),
+                """
+                UPDATE town_life_players
+                SET stamina = ?, stamina_updated_at = ?, updated_at = ?
+                WHERE user_id = ?
+                """,
+                (current + restored, now, now, str(user_id)),
             )
             self._change_inventory(conn, user_id, item_key, -1)
             conn.commit()

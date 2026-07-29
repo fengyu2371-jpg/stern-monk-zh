@@ -6084,7 +6084,7 @@ def town_life_home_embed(
         "三條路線可以同時發展，不需要永久鎖定職業。\n\n"
         f"**麻瓜幣**：{int(player['coins'])}\n"
         f"**體力**：{int(player['stamina'])}／{int(player['max_stamina'])}"
-        "（每天凌晨 00:00 重置）\n"
+        "（每分鐘恢復 1 點；每天凌晨 00:00 重置）\n"
         f"**精神力**：{int(player['spirit'])}／{int(player['max_spirit'])}"
         "（透過料理或每日休息恢復）\n"
         f"**物資總數**：{inventory_total}\n"
