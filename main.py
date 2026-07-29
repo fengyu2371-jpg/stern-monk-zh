@@ -1927,6 +1927,7 @@ from town_life import (
     CROP_CONFIG,
     FOOD_RECIPE_CONFIG,
     ITEM_CONFIG,
+    MAX_DAILY_FOOD_STAMINA,
     MAX_TOOL_LEVEL,
     MINING_AREA_CONFIG,
     TOOL_CONFIG,
@@ -6171,6 +6172,7 @@ def workshop_embed(
     snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
     player = snapshot["player"]
     inventory = snapshot["inventory"]
+    stamina_daily_remaining = _food_stamina_daily_remaining(player)
     level = int(snapshot["tools"].get(tool_key, 0))
 
     if level >= 5:
@@ -6198,7 +6200,8 @@ def workshop_embed(
             for item_key, quantity in dict(recipe["ingredients"]).items()
         }
         recipe_lines.append(
-            f"**{recipe['name']}**｜恢復 {int(recipe['spirit_restore'])} 精神力\n"
+            f"**{recipe['name']}**｜恢復 {int(recipe.get('stamina_restore', 0))} 體力／"
+            f"{int(recipe['spirit_restore'])} 精神力\n"
             f"材料：{format_item_requirements(ingredients)}｜持有×{int(inventory.get(recipe_key, 0))}"
         )
 
@@ -6214,7 +6217,9 @@ def workshop_embed(
     )
     description = (
         f"**麻瓜幣**：{int(player['coins'])}\n"
+        f"**體力**：{int(player['stamina'])}／{int(player['max_stamina'])}\n"
         f"**精神力**：{int(player['spirit'])}／{int(player['max_spirit'])}\n"
+        f"**今日料理可回體**：{stamina_daily_remaining}／{MAX_DAILY_FOOD_STAMINA}\n"
         f"**{info['name']}**：Lv.{level}\n"
         f"**下一階段**：{upgrade_text}\n\n"
         + ("\n\n".join(recipe_lines) if recipe_lines else "這個工坊目前沒有料理配方。")
@@ -6552,6 +6557,15 @@ def _inventory_selected_attachments(selected_item_key: str) -> list[discord.File
     return town_life_item_attachments(selected_item_key) if selected_item_key else []
 
 
+def _food_stamina_daily_remaining(player: dict[str, Any]) -> int:
+    recovered_today = (
+        int(player.get("food_stamina_recovered") or 0)
+        if str(player.get("food_stamina_date") or "") == taipei_today().isoformat()
+        else 0
+    )
+    return max(0, MAX_DAILY_FOOD_STAMINA - recovered_today)
+
+
 def _inventory_initial_state(
     user_id: int,
     preferred_category: str = "farming",
@@ -6599,6 +6613,8 @@ def inventory_market_embed(
     if snapshot is None:
         snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
     inventory = snapshot["inventory"]
+    player = snapshot["player"]
+    stamina_daily_remaining = _food_stamina_daily_remaining(player)
     if category not in INVENTORY_CATEGORY_LABELS:
         category = "farming"
     keys = _inventory_keys(
@@ -6614,8 +6630,10 @@ def inventory_market_embed(
         selected_item_key = page_keys[0] if page_keys else ""
 
     lines = [
-        f"**麻瓜幣**：{int(snapshot['player']['coins'])}",
-        f"**精神力**：{int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}",
+        f"**麻瓜幣**：{int(player['coins'])}",
+        f"**體力**：{int(player['stamina'])}／{int(player['max_stamina'])}",
+        f"**精神力**：{int(player['spirit'])}／{int(player['max_spirit'])}",
+        f"**今日料理可回體**：{stamina_daily_remaining}／{MAX_DAILY_FOOD_STAMINA}",
         f"**分類**：{INVENTORY_CATEGORY_LABELS[category]}｜第 {page + 1}／{page_count} 頁",
     ]
 
@@ -6959,13 +6977,16 @@ class MealEatSelect(discord.ui.Select):
         self.route_key = route_key
         snapshot = TOWN_LIFE_DB.get_snapshot(owner_id)
         inventory = snapshot["inventory"]
+        stamina_daily_remaining = _food_stamina_daily_remaining(snapshot["player"])
         options = [
             discord.SelectOption(
                 label=f"食用 {recipe['name']}",
                 value=key,
                 description=(
                     f"持有 {int(inventory.get(key, 0))} 份｜"
-                    f"恢復 {int(recipe['spirit_restore'])} 精神力"
+                    f"+{int(recipe.get('stamina_restore', 0))} 體／"
+                    f"+{int(recipe['spirit_restore'])} 精｜"
+                    f"今日可回體 {stamina_daily_remaining}"
                 ),
             )
             for key, recipe in FOOD_RECIPE_CONFIG.items()
@@ -6990,8 +7011,10 @@ class MealEatSelect(discord.ui.Select):
             await _town_life_send_error(interaction, exc)
             return
         notice = (
-            f"食用{item_name(food_key)}，恢復 {int(result['restored'])} 精神力；"
-            f"目前 {int(result['spirit'])}／{int(result['max_spirit'])}。"
+            f"食用{item_name(food_key)}，恢復 {int(result['stamina_restored'])} 體力／"
+            f"{int(result['spirit_restored'])} 精神力；"
+            f"目前體力 {int(result['stamina'])}／{int(result['max_stamina'])}、"
+            f"精神力 {int(result['spirit'])}／{int(result['max_spirit'])}。"
         )
         await interaction.response.edit_message(
             embed=workshop_embed(self.owner_id, self.route_key, notice=notice, item_key=food_key),
@@ -7946,7 +7969,29 @@ class InventoryMarketView(UserOwnedView):
         )
 
         if self.selected_item_key in FOOD_RECIPE_CONFIG and int(inventory.get(self.selected_item_key, 0)) > 0:
-            button = discord.ui.Button(label="食用一份", style=discord.ButtonStyle.success, row=3)
+            player = snapshot["player"]
+            stamina_full = int(player["stamina"]) >= int(player["max_stamina"])
+            spirit_full = int(player["spirit"]) >= int(player["max_spirit"])
+            stamina_daily_remaining = _food_stamina_daily_remaining(player)
+            blocked_by_daily_cap = not stamina_full and stamina_daily_remaining <= 0
+            if spirit_full and (stamina_full or blocked_by_daily_cap):
+                label = "目前不需食用"
+                disabled = True
+            elif blocked_by_daily_cap:
+                label = "今日回體已達上限"
+                disabled = True
+            elif stamina_full:
+                label = "食用一份（只回精神）"
+                disabled = False
+            else:
+                label = "食用一份"
+                disabled = False
+            button = discord.ui.Button(
+                label=label,
+                style=discord.ButtonStyle.success,
+                row=3,
+                disabled=disabled,
+            )
             button.callback = self._eat_selected
             self.add_item(button)
         elif self.selected_item_key == "stamina_potion" and int(inventory.get(self.selected_item_key, 0)) > 0:
