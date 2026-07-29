@@ -1,5 +1,5 @@
 {
-  "count": 37,
+  "count": 38,
   "failures": [],
   "files": [
     {
@@ -292,6 +292,14 @@
     },
     {
       "filename": "stamina_potion.png",
+      "size": [
+        128,
+        128
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "filename": "maintenance_stamina_potion.png",
       "size": [
         128,
         128
