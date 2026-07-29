@@ -7320,11 +7320,20 @@ class FarmRouteView(UserOwnedView):
 class RanchView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
         super().__init__(owner_id, timeout=900, add_home_button=False)
+        self._animal_purchase_started = False
 
     async def _buy_animal(self, interaction: discord.Interaction, animal_key: str) -> None:
+        if self._animal_purchase_started:
+            await send_ephemeral_message(
+                interaction,
+                "上一筆動物購買正在處理，請等待畜牧場畫面更新後再操作。",
+            )
+            return
+        self._animal_purchase_started = True
         try:
             result = TOWN_LIFE_DB.buy_animal(self.owner_id, animal_key)
         except TownLifeError as exc:
+            self._animal_purchase_started = False
             await _town_life_send_error(interaction, exc)
             return
         animal = ANIMAL_CONFIG[animal_key]

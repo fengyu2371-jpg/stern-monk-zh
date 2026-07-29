@@ -1087,7 +1087,12 @@ class TownLifeDatabase:
                 (current + 1, now, str(user_id), animal_key),
             )
             conn.commit()
-        return {"animal_key": animal_key, "quantity": current + 1, "cost": cost}
+        return {
+            "animal_key": animal_key,
+            "product": str(animal["product"]),
+            "quantity": current + 1,
+            "cost": cost,
+        }
 
     def collect_animal_product(self, user_id: int, animal_key: str) -> dict[str, Any]:
         animal = ANIMAL_CONFIG.get(animal_key)
