@@ -66,6 +66,7 @@ class FakeInteraction:
         *,
         user_id: int = 1001,
         message: object | None = None,
+        original_message: object | None = None,
     ) -> None:
         self.response = FakeResponse()
         self.followup = FakeFollowup()
@@ -75,15 +76,22 @@ class FakeInteraction:
             display_name="測試玩家",
         )
         self.message = message
+        self.original_message = original_message
         self.channel_id = 123456789
 
-    async def edit_original_response(self, **kwargs: object) -> None:
+    async def edit_original_response(self, **kwargs: object) -> object | None:
         self.original_edits.append(kwargs)
+        return self.original_message
 
 
 class FakeMessage:
-    def __init__(self, message_id: int = 987654321) -> None:
+    def __init__(
+        self,
+        message_id: int = 987654321,
+        channel_id: int = 123456789,
+    ) -> None:
         self.id = int(message_id)
+        self.channel = SimpleNamespace(id=int(channel_id))
         self.edits: list[dict[str, object]] = []
 
     async def edit(self, **kwargs: object) -> None:
@@ -861,6 +869,78 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
             self.assertIn("操作畫面已鎖定", message.edits[0]["embed"].title)
         finally:
             main.ACTIVE_PLAYER_PANELS.pop(self.user_id, None)
+
+    async def test_opening_new_panel_visibly_locks_previous_panel(self) -> None:
+        previous_message = FakeMessage(message_id=111)
+        new_message = FakeMessage(message_id=222)
+        interaction = FakeInteraction(
+            user_id=self.user_id,
+            original_message=new_message,
+        )
+
+        with (
+            mock.patch.object(
+                main,
+                "fetch_saved_player_panel",
+                new=mock.AsyncMock(return_value=previous_message),
+            ),
+            mock.patch.object(
+                main.ACADEMY_DB,
+                "save_player_panel",
+            ) as save_panel,
+            mock.patch.object(
+                main,
+                "activate_player_panel",
+            ) as activate_panel,
+        ):
+            returned = await main.open_player_panel_page(
+                interaction,
+                embed=main.monk_embed("新面板", "測試"),
+                view=main.PlayerPanelHomeView(self.user_id),
+            )
+
+        self.assertIs(returned, new_message)
+        save_panel.assert_called_once()
+        activate_panel.assert_called_once()
+        self.assertEqual(len(previous_message.edits), 1)
+        locked = previous_message.edits[0]
+        self.assertIsNone(locked["view"])
+        self.assertEqual(locked["attachments"], [])
+        self.assertIn("舊面板已鎖定", locked["embed"].title)
+        self.assertIn("已開啟新的操作面板", locked["embed"].description)
+
+    async def test_failed_new_panel_creation_does_not_lock_previous_panel(self) -> None:
+        previous_message = FakeMessage(message_id=111)
+        interaction = FakeInteraction(user_id=self.user_id)
+        interaction.edit_original_response = mock.AsyncMock(
+            side_effect=RuntimeError("Discord render failed"),
+        )
+
+        with (
+            mock.patch.object(
+                main,
+                "fetch_saved_player_panel",
+                new=mock.AsyncMock(return_value=previous_message),
+            ),
+            mock.patch.object(
+                main.ACADEMY_DB,
+                "save_player_panel",
+            ) as save_panel,
+            mock.patch.object(
+                main,
+                "activate_player_panel",
+            ) as activate_panel,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "render failed"):
+                await main.open_player_panel_page(
+                    interaction,
+                    embed=main.monk_embed("新面板", "測試"),
+                    view=main.PlayerPanelHomeView(self.user_id),
+                )
+
+        self.assertEqual(previous_message.edits, [])
+        save_panel.assert_not_called()
+        activate_panel.assert_not_called()
 
     async def test_expired_confession_modal_is_rejected_without_processing(self) -> None:
         message_id = 123456

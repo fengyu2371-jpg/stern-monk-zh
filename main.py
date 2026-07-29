@@ -2078,18 +2078,31 @@ PLAYER_PANEL_TIMEOUT_SECONDS = 300
 def locked_operation_embed(
     *,
     owner_name: str | None = None,
+    replaced: bool = False,
 ) -> discord.Embed:
     display_name = owner_name or "這位學生"
+    if replaced:
+        title = "🔒 舊面板已鎖定"
+        description = (
+            f"**{display_name}** 已開啟新的操作面板。\n\n"
+            "為避免操作到過期資料，這則舊面板的按鈕與選單已關閉。\n"
+            "請使用最新產生的面板繼續操作。"
+        )
+        footer = "這不是錯誤；同一位玩家只保留最新面板可操作。"
+    else:
+        title = "🔒 操作畫面已鎖定"
+        description = (
+            f"**{display_name}** 的操作畫面已超過 5 分鐘沒有互動。\n\n"
+            "為避免他人誤觸，所有按鈕與選單已關閉。\n"
+            "需要繼續操作時，請重新輸入 `/學生資料` 或 `/城下町`。"
+        )
+        footer = "公開資料內容不會被刪除；只有操作入口已關閉。"
     embed = monk_embed(
-        "🔒 操作畫面已鎖定",
-        f"**{display_name}** 的操作畫面已超過 5 分鐘沒有互動。\n\n"
-        "為避免他人誤觸，所有按鈕與選單已關閉。\n"
-        "需要繼續操作時，請重新輸入 `/學生資料` 或 `/城下町`。",
+        title,
+        description,
         color=0x747F8D,
     )
-    embed.set_footer(
-        text="公開資料內容不會被刪除；只有操作入口已關閉。"
-    )
+    embed.set_footer(text=footer)
     return embed
 
 
@@ -9157,7 +9170,7 @@ async def open_player_panel_page(
     embed: discord.Embed,
     view: discord.ui.View,
 ) -> discord.InteractionMessage:
-    """Open a new player panel while keeping the previous message visible."""
+    """Open a new player panel, then visibly lock the previous panel."""
     if not interaction.response.is_done():
         await interaction.response.defer(thinking=True)
 
@@ -9188,20 +9201,29 @@ async def open_player_panel_page(
         message=message,
     )
 
-    # 舊訊息保留內容，只移除舊按鈕；若 Discord 回傳的是同一則訊息，絕不處理。
+    # 舊訊息保留為明確的鎖定提示並移除按鈕；若 Discord 回傳的是
+    # 同一則訊息，絕不處理。新面板若建立失敗，也不會走到這裡誤鎖舊面板。
     if (
         previous_message is not None
         and previous_message.id != message.id
     ):
         try:
-            await previous_message.edit(view=None)
+            await previous_message.edit(
+                content=None,
+                embed=locked_operation_embed(
+                    owner_name=interaction.user.display_name,
+                    replaced=True,
+                ),
+                attachments=[],
+                view=None,
+            )
         except (
             discord.NotFound,
             discord.Forbidden,
             discord.HTTPException,
         ):
             logger.debug(
-                "新面板已建立，但無法移除舊面板操作元件。",
+                "新面板已建立，但無法將舊面板切換成鎖定畫面。",
                 exc_info=True,
             )
 
