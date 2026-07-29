@@ -1,7 +1,0 @@
-[build]
-builder = "railpack"
-
-[deploy]
-startCommand = "python main.py"
-restartPolicyType = "on_failure"
-restartPolicyMaxRetries = 10
