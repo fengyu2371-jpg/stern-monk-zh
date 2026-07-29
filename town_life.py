@@ -1354,10 +1354,10 @@ class TownLifeDatabase:
             """
             UPDATE town_life_players
             SET stamina = ?, food_stamina_date = ?,
-                food_stamina_recovered = ?, updated_at = ?
+                food_stamina_recovered = ?, stamina_updated_at = ?, updated_at = ?
             WHERE user_id = ?
             """,
-            (current + restored, today, recovered_today + restored, now, uid),
+            (current + restored, today, recovered_today + restored, now, now, uid),
         )
         return restored, current + restored, daily_remaining - restored
 
@@ -1407,12 +1407,25 @@ class TownLifeDatabase:
             spirit_full = int(player["spirit"]) >= int(player["max_spirit"])
             stamina_full = int(player["stamina"]) >= int(player["max_stamina"])
             same_day = str(player["food_stamina_date"] or "") == today_key()
-            stamina_cap_full = (
-                same_day
-                and int(player["food_stamina_recovered"] or 0) >= MAX_DAILY_FOOD_STAMINA
+            stamina_recovered_today = (
+                int(player["food_stamina_recovered"] or 0) if same_day else 0
             )
+            stamina_daily_remaining = max(
+                0,
+                MAX_DAILY_FOOD_STAMINA - stamina_recovered_today,
+            )
+            stamina_cap_full = stamina_daily_remaining <= 0
             if spirit_full and (stamina_full or stamina_cap_full):
                 raise TownLifeError("體力與精神力目前不需要再補充，先把料理留著。")
+            if (
+                int(recipe.get("stamina_restore", 0)) > 0
+                and not stamina_full
+                and stamina_cap_full
+            ):
+                raise TownLifeError(
+                    f"今天由料理恢復的體力已達 {MAX_DAILY_FOOD_STAMINA} 點上限。"
+                    "這份料理目前只會恢復精神力，系統已替你保留，沒有消耗。"
+                )
 
             spirit_restored = self._restore_spirit(
                 conn, user_id, int(recipe["spirit_restore"])
