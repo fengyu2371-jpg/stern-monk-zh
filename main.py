@@ -1930,6 +1930,7 @@ from town_life import (
     MAX_DAILY_FOOD_STAMINA,
     MAX_TOOL_LEVEL,
     MINING_AREA_CONFIG,
+    POTION_CONFIG,
     TOOL_CONFIG,
     TOOL_UPGRADE_SPIRIT_COSTS,
     UPGRADE_MATERIAL_KEYS,
@@ -6079,6 +6080,9 @@ def town_life_home_embed(
     snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
     player = snapshot["player"]
     inventory_total = sum(int(value) for value in snapshot["inventory"].values())
+    unclaimed_mail = sum(
+        1 for mail in snapshot["mailbox"] if not str(mail["claimed_at"])
+    )
     description = (
         "城下町的生活職業以生產、採集與工具成長為核心。"
         "三條路線可以同時發展，不需要永久鎖定職業。\n\n"
@@ -6088,6 +6092,7 @@ def town_life_home_embed(
         f"**精神力**：{int(player['spirit'])}／{int(player['max_spirit'])}"
         "（透過料理或每日休息恢復）\n"
         f"**物資總數**：{inventory_total}\n"
+        f"**信箱**：{'有 ' + str(unclaimed_mail) + ' 封待領' if unclaimed_mail else '沒有待領附件'}\n"
         f"**工具**：{_town_life_tool_text(snapshot)}"
     )
     if notice:
@@ -6647,8 +6652,11 @@ def inventory_market_embed(
                 f"食用後恢復 {int(recipe.get('stamina_restore', 0))} 體力、"
                 f"{int(recipe['spirit_restore'])} 精神力"
             )
-        elif selected_item_key == "stamina_potion":
-            summary = "使用後恢復 250 體力"
+        elif selected_item_key in POTION_CONFIG:
+            summary = (
+                f"使用後恢復 "
+                f"{int(POTION_CONFIG[selected_item_key]['stamina_restore'])} 體力"
+            )
         elif selected_item_key in UPGRADE_MATERIAL_KEYS:
             summary = f"單價 {sell_price}｜系統會保留下一級工具所需數量"
         elif sell_price > 0:
@@ -6808,6 +6816,13 @@ class CropPlantSelect(discord.ui.Select):
 class TownLifeHubView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
         super().__init__(owner_id, timeout=900)
+        snapshot = TOWN_LIFE_DB.get_snapshot(owner_id)
+        unclaimed = sum(
+            1 for mail in snapshot["mailbox"] if not str(mail["claimed_at"])
+        )
+        self.mailbox.label = (
+            f"信箱｜{unclaimed} 封待領" if unclaimed else "信箱"
+        )
 
     @discord.ui.button(label="農牧師", style=discord.ButtonStyle.success, row=0)
     async def farming_route(
@@ -6924,6 +6939,18 @@ class TownLifeHubView(UserOwnedView):
             view=TownLifeHubView(self.owner_id),
         )
 
+    @discord.ui.button(label="信箱", style=discord.ButtonStyle.primary, row=2)
+    async def mailbox(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=mailbox_embed(self.owner_id),
+            attachments=[],
+            view=MailboxView(self.owner_id),
+        )
+
     @discord.ui.button(label="返回城下町", style=discord.ButtonStyle.secondary, row=2)
     async def back_to_town(
         self,
@@ -6936,6 +6963,93 @@ class TownLifeHubView(UserOwnedView):
             embed=embed,
             attachments=attachments,
             view=TownHubView(self.owner_id),
+        )
+
+
+def mailbox_embed(
+    user_id: int,
+    *,
+    notice: str = "",
+    item_key: str = "",
+) -> discord.Embed:
+    snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
+    mailbox = snapshot["mailbox"]
+    unclaimed = [mail for mail in mailbox if not str(mail["claimed_at"])]
+    lines = [
+        f"**待領信件**：{len(unclaimed)} 封",
+        "附件領取成功後會留存「已領取」紀錄，不會重複發放。",
+    ]
+    if mailbox:
+        for mail in mailbox[:10]:
+            claimed = bool(str(mail["claimed_at"]))
+            state = "已領取" if claimed else "待領取"
+            lines += [
+                "",
+                f"**{mail['title']}｜{state}**",
+                str(mail["body"]),
+                f"附件：{item_name(str(mail['item_key']))}×{int(mail['quantity'])}",
+            ]
+    else:
+        lines += ["", "目前沒有信件。"]
+
+    description = "\n".join(lines)
+    if notice:
+        description = f"**本次結果**\n{notice}\n\n{description}"
+    embed = monk_embed("城下町｜信箱", description, color=0x4E78A0)
+    display_item = item_key or (
+        str(unclaimed[0]["item_key"]) if unclaimed else ""
+    )
+    return _town_life_embed_with_item_thumbnail(embed, display_item)
+
+
+class MailboxView(UserOwnedView):
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(owner_id, timeout=900, add_home_button=False)
+        mailbox = TOWN_LIFE_DB.get_snapshot(owner_id)["mailbox"]
+        unclaimed = sum(1 for mail in mailbox if not str(mail["claimed_at"]))
+        self.claim_all.disabled = unclaimed <= 0
+        self.claim_all.label = (
+            f"領取全部｜{unclaimed} 封" if unclaimed else "沒有待領附件"
+        )
+
+    @discord.ui.button(label="領取全部", style=discord.ButtonStyle.success, row=0)
+    async def claim_all(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if not await _town_life_begin_action(self, interaction):
+            return
+        try:
+            result = TOWN_LIFE_DB.claim_all_mail(self.owner_id)
+            _town_life_mark_committed(self)
+        except TownLifeError as exc:
+            _town_life_release_action(self)
+            await _town_life_send_error(interaction, exc)
+            return
+        rewards = dict(result["rewards"])
+        reward_text = format_item_requirements(rewards)
+        display_item = next(iter(rewards), "")
+        await interaction.response.edit_message(
+            embed=mailbox_embed(
+                self.owner_id,
+                notice=f"已領取 {int(result['claimed_count'])} 封信件：{reward_text}。",
+                item_key=display_item,
+            ),
+            attachments=town_life_item_attachments(display_item),
+            view=MailboxView(self.owner_id),
+        )
+
+    @discord.ui.button(label="返回生活職業", style=discord.ButtonStyle.secondary, row=0)
+    async def back(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=town_life_home_embed(self.owner_id),
+            attachments=[],
+            view=TownLifeHubView(self.owner_id),
         )
 
 
@@ -7994,7 +8108,7 @@ class InventoryMarketView(UserOwnedView):
             )
             button.callback = self._eat_selected
             self.add_item(button)
-        elif self.selected_item_key == "stamina_potion" and int(inventory.get(self.selected_item_key, 0)) > 0:
+        elif self.selected_item_key in POTION_CONFIG and int(inventory.get(self.selected_item_key, 0)) > 0:
             button = discord.ui.Button(label="使用藥水", style=discord.ButtonStyle.success, row=3)
             button.callback = self._use_potion
             self.add_item(button)
@@ -8074,8 +8188,10 @@ class InventoryMarketView(UserOwnedView):
             recipe = FOOD_RECIPE_CONFIG[key]
             lines.append(f"效果：恢復 {int(recipe.get('stamina_restore', 0))} 體力、{int(recipe['spirit_restore'])} 精神力")
             lines.append("販售：不可出售")
-        elif key == "stamina_potion":
-            lines.append("效果：恢復 250 體力")
+        elif key in POTION_CONFIG:
+            lines.append(
+                f"效果：恢復 {int(POTION_CONFIG[key]['stamina_restore'])} 體力"
+            )
             lines.append("販售：不可出售")
         else:
             price = int(item.get("sell", 0))
@@ -8122,14 +8238,21 @@ class InventoryMarketView(UserOwnedView):
     async def _use_potion(self, interaction: discord.Interaction) -> None:
         if not await _town_life_begin_action(self, interaction):
             return
+        key = self.selected_item_key
         try:
-            result = TOWN_LIFE_DB.use_stamina_potion(self.owner_id, "stamina_potion")
+            result = TOWN_LIFE_DB.use_stamina_potion(self.owner_id, key)
             _town_life_mark_committed(self)
         except TownLifeError as exc:
             _town_life_release_action(self)
             await _town_life_send_error(interaction, exc)
             return
-        await self._render(interaction, notice=f"使用體力藥水×1｜+{int(result['stamina_restored'])} 體力")
+        await self._render(
+            interaction,
+            notice=(
+                f"使用{item_name(key)}×1｜"
+                f"+{int(result['stamina_restored'])} 體力"
+            ),
+        )
 
     async def _sell(self, interaction: discord.Interaction, category: str, label: str) -> None:
         if not await _town_life_begin_action(self, interaction):
