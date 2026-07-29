@@ -2621,11 +2621,13 @@ class OutfitKeywordModal(SafeModal, title="今日穿搭推薦｜關鍵詞"):
         user_id: int,
         direction_key: str,
         source_message: discord.Message | None,
+        flow_view: "OutfitDirectionView",
     ) -> None:
         super().__init__()
         self.user_id = int(user_id)
         self.direction_key = direction_key
         self.source_message = source_message
+        self.flow_view = flow_view
 
     async def on_submit(
         self,
@@ -2637,6 +2639,17 @@ class OutfitKeywordModal(SafeModal, title="今日穿搭推薦｜關鍵詞"):
                 ephemeral=True,
             )
             return
+
+        if not self.flow_view.active:
+            await interaction.response.send_message(
+                "這份穿搭表單已逾時或已完成，沒有扣除今日使用次數。"
+                "請重新輸入 `/今日穿搭推薦`。",
+                ephemeral=True,
+            )
+            return
+
+        # 表單一送出就關閉本次流程，避免重複提交造成重複計次。
+        self.flow_view.close_flow()
 
         period_key = taipei_today().isoformat()
         reserved = ACADEMY_DB.try_reserve_usage(
@@ -2747,11 +2760,19 @@ class OutfitDirectionSelect(discord.ui.Select):
         self,
         interaction: discord.Interaction,
     ) -> None:
+        flow_view = self.view
+        if not isinstance(flow_view, OutfitDirectionView):
+            await interaction.response.send_message(
+                "這份穿搭選單狀態異常，請重新輸入 `/今日穿搭推薦`。",
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_modal(
             OutfitKeywordModal(
                 user_id=self.owner_id,
                 direction_key=self.values[0],
                 source_message=interaction.message,
+                flow_view=flow_view,
             )
         )
 
@@ -2761,7 +2782,12 @@ class OutfitDirectionView(discord.ui.View):
         super().__init__(timeout=300)
         self.owner_id = int(owner_id)
         self.message: discord.Message | None = None
+        self.active = True
         self.add_item(OutfitDirectionSelect(owner_id))
+
+    def close_flow(self) -> None:
+        self.active = False
+        self.stop()
 
     async def interaction_check(
         self,
@@ -2788,6 +2814,7 @@ class OutfitDirectionView(discord.ui.View):
         )
 
     async def on_timeout(self) -> None:
+        self.close_flow()
         if self.message is None:
             return
         try:
@@ -3371,7 +3398,7 @@ async def resolve_shop_cover_url(
 class ReturnToPlayerHomeButton(discord.ui.Button):
     def __init__(self) -> None:
         super().__init__(
-            label="返回我的面板",
+            label="返回主面板",
             style=discord.ButtonStyle.secondary,
             emoji="↩️",
             row=4,
@@ -3403,10 +3430,11 @@ class UserOwnedView(discord.ui.View):
         self,
         owner_id: int,
         *,
-        timeout: float | None = None,
         add_home_button: bool = True,
         auto_defer: bool = False,
     ) -> None:
+        # 玩家面板會在同一則訊息中切換許多 View。為避免各頁 View
+        # 與外部計時器互相競爭，唯一逾時來源統一由 PlayerPanelSession 管理。
         super().__init__(timeout=None)
         self.owner_id = int(owner_id)
         self.auto_defer = bool(auto_defer)
@@ -4137,7 +4165,7 @@ class OracleBookView(UserOwnedView):
         *,
         index: int | None = None,
     ) -> None:
-        super().__init__(owner_id, timeout=900)
+        super().__init__(owner_id)
         self.pages = pages
         self.index = len(pages) - 1 if index is None else index
         self._refresh_buttons()
@@ -4282,7 +4310,7 @@ class OracleDeleteConfirmView(UserOwnedView):
         pages: list[dict[str, Any]],
         index: int,
     ) -> None:
-        super().__init__(owner_id, timeout=300)
+        super().__init__(owner_id)
         self.pages = list(pages)
         self.index = index
 
@@ -4578,7 +4606,7 @@ class EnrollmentSetupView(UserOwnedView):
         owner_id: int,
         existing: dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(owner_id, timeout=900)
+        super().__init__(owner_id)
         self.existing = existing or {}
         self.selected_house = self.existing.get("house") or "尚未分院"
         self.selected_year = (
@@ -4672,7 +4700,7 @@ class EnrollmentSetupView(UserOwnedView):
 
 class StudentHubView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
-        super().__init__(owner_id, timeout=900)
+        super().__init__(owner_id)
 
     @discord.ui.button(
         label="學籍總覽",
@@ -4805,7 +4833,7 @@ class StudentHubView(UserOwnedView):
 
 class PlaceRegistrationOptionsView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
-        super().__init__(owner_id, timeout=900)
+        super().__init__(owner_id)
         self.place_type = "商店"
         self.district = "中央廣場"
         self.source_kind = "新登記"
@@ -5281,7 +5309,7 @@ class PlaceDistrictChangeView(UserOwnedView):
         owner_id: int,
         place: dict[str, Any],
     ) -> None:
-        super().__init__(owner_id, timeout=900)
+        super().__init__(owner_id)
         self.place_id = int(place["id"])
         self.add_item(PlaceDistrictSelect(owner_id, place))
 
@@ -5658,7 +5686,7 @@ class PlaceVisibilityEditorView(UserOwnedView):
         owner_id: int,
         place: dict[str, Any],
     ) -> None:
-        super().__init__(owner_id, timeout=900)
+        super().__init__(owner_id)
         self.place = place
         self._refresh_button()
 
@@ -5791,7 +5819,7 @@ class PlaceVisibilityPickerView(UserOwnedView):
         owner_id: int,
         places: list[dict[str, Any]],
     ) -> None:
-        super().__init__(owner_id, timeout=900)
+        super().__init__(owner_id)
         self.add_item(PlaceVisibilitySelect(owner_id, places))
 
     @discord.ui.button(
@@ -5973,7 +6001,7 @@ class DistrictBrowserView(UserOwnedView):
         *,
         selected_key: str = DISTRICT_OVERVIEW_KEY,
     ) -> None:
-        super().__init__(owner_id, timeout=900)
+        super().__init__(owner_id)
         self.selected_key = (
             selected_key
             if selected_key in DISTRICT_GUIDE
@@ -6845,7 +6873,7 @@ class CropPlantSelect(discord.ui.Select):
 
 class TownLifeHubView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
-        super().__init__(owner_id, timeout=900)
+        super().__init__(owner_id)
         snapshot = TOWN_LIFE_DB.get_snapshot(owner_id)
         unclaimed = sum(
             1 for mail in snapshot["mailbox"] if not str(mail["claimed_at"])
@@ -7034,7 +7062,7 @@ def mailbox_embed(
 
 class MailboxView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
-        super().__init__(owner_id, timeout=900, add_home_button=False)
+        super().__init__(owner_id, add_home_button=False)
         mailbox = TOWN_LIFE_DB.get_snapshot(owner_id)["mailbox"]
         unclaimed = sum(1 for mail in mailbox if not str(mail["claimed_at"]))
         self.claim_all.disabled = unclaimed <= 0
@@ -7085,7 +7113,7 @@ class MailboxView(UserOwnedView):
 
 class ToolShopView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
-        super().__init__(owner_id, timeout=900, add_home_button=False)
+        super().__init__(owner_id, add_home_button=False)
 
     async def _open(self, interaction: discord.Interaction, route_key: str) -> None:
         await interaction.response.edit_message(
@@ -7175,7 +7203,7 @@ class WorkshopView(UserOwnedView):
     }
 
     def __init__(self, owner_id: int, route_key: str) -> None:
-        super().__init__(owner_id, timeout=900, add_home_button=False)
+        super().__init__(owner_id, add_home_button=False)
         if route_key not in self.ROUTE_TO_TOOL:
             raise ValueError(f"未知工坊路線：{route_key}")
         self.route_key = route_key
@@ -7331,7 +7359,7 @@ class WorkshopView(UserOwnedView):
 
 class FarmRouteView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
-        super().__init__(owner_id, timeout=900, add_home_button=False)
+        super().__init__(owner_id, add_home_button=False)
         self.add_item(SeedPurchaseSelect(owner_id))
         self.add_item(CropPlantSelect(owner_id))
 
@@ -7388,7 +7416,7 @@ class FarmRouteView(UserOwnedView):
 
 class RanchView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
-        super().__init__(owner_id, timeout=900, add_home_button=False)
+        super().__init__(owner_id, add_home_button=False)
         snapshot = TOWN_LIFE_DB.get_snapshot(owner_id)
         self._configure_buttons(snapshot)
 
@@ -7562,7 +7590,7 @@ class RanchView(UserOwnedView):
 
 class FishingRouteView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
-        super().__init__(owner_id, timeout=900, add_home_button=False)
+        super().__init__(owner_id, add_home_button=False)
 
     async def _run_fishing_action(
         self,
@@ -7751,7 +7779,7 @@ class FishingRouteView(UserOwnedView):
 
 class CrystalRouteView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
-        super().__init__(owner_id, timeout=900, add_home_button=False)
+        super().__init__(owner_id, add_home_button=False)
 
     async def _mine_area(
         self,
@@ -7992,7 +8020,7 @@ class StoveView(UserOwnedView):
         *,
         selected_recipe_key: str = "",
     ) -> None:
-        super().__init__(owner_id, timeout=300, add_home_button=False)
+        super().__init__(owner_id, add_home_button=False)
         self.selected_recipe_key = (
             selected_recipe_key
             if selected_recipe_key in FOOD_RECIPE_CONFIG
@@ -8263,7 +8291,6 @@ class InventoryMarketView(UserOwnedView):
     ) -> None:
         super().__init__(
             owner_id,
-            timeout=300,
             add_home_button=False,
             auto_defer=True,
         )
@@ -8527,7 +8554,7 @@ class InventoryMarketView(UserOwnedView):
 
 class TownHubView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
-        super().__init__(owner_id, timeout=900)
+        super().__init__(owner_id)
 
     async def _show_place_list(
         self,
@@ -8759,14 +8786,9 @@ async def _handle_confession(
         )
         return
 
-    await interaction.response.edit_message(
-        embed=monk_embed(
-            "📖 神諭生成中",
-            "赤木修士正在整理本週素材。請稍候。",
-            color=0x7A5AC8,
-        ),
-        view=None,
-    )
+    # 告解結果是私人訊息，不應拿公開的玩家面板當作等待畫面。
+    # 只延後回應，讓原面板與按鈕保持原狀。
+    await interaction.response.defer(ephemeral=True, thinking=True)
 
     try:
         ai_reply = await ask_openai_confession(
@@ -8823,10 +8845,28 @@ class ConfessionModal(SafeModal, title="禊月堂修士告解室"):
         max_length=1000,
     )
 
+    def __init__(
+        self,
+        *,
+        user_id: int,
+        source_message_id: int,
+    ) -> None:
+        super().__init__()
+        self.user_id = int(user_id)
+        self.source_message_id = int(source_message_id)
+
     async def on_submit(
         self,
         interaction: discord.Interaction,
     ) -> None:
+        session = await validate_modal_player_panel(
+            interaction,
+            owner_id=self.user_id,
+            source_message_id=self.source_message_id,
+        )
+        if session is None:
+            return
+
         await _handle_confession(
             interaction,
             str(self.content.value),
@@ -8965,7 +9005,7 @@ async def _handle_current_week_oracle(
 
 class OracleHubView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
-        super().__init__(owner_id, timeout=900)
+        super().__init__(owner_id)
 
     @discord.ui.button(
         label="抽取新神諭",
@@ -9014,7 +9054,6 @@ class PlayerPanelHomeView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
         super().__init__(
             owner_id,
-            timeout=None,
             add_home_button=False,
         )
 
@@ -9097,8 +9136,18 @@ class PlayerPanelHomeView(UserOwnedView):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
+        message = interaction.message
+        if message is None:
+            await interaction.response.send_message(
+                "找不到這個面板的來源訊息，請重新輸入 `/學生資料` 或 `/城下町`。",
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_modal(
-            ConfessionModal()
+            ConfessionModal(
+                user_id=self.owner_id,
+                source_message_id=message.id,
+            )
         )
 
 
@@ -9194,16 +9243,6 @@ async def _open_student_data_panel(
     description="查看並管理自己的學籍、地點與神諭設定",
 )
 async def student_data_command(
-    interaction: discord.Interaction,
-) -> None:
-    await _open_student_data_panel(interaction)
-
-
-@tree.command(
-    name="我的",
-    description="開啟我的主要操作面板，並同步檢查當日體力",
-)
-async def my_panel_command(
     interaction: discord.Interaction,
 ) -> None:
     await _open_student_data_panel(interaction)
@@ -9348,6 +9387,7 @@ async def download_current_backup(
 async def monk_status(
     interaction: discord.Interaction,
 ) -> None:
+    command_count = len(tree.get_commands())
     confession_ai_status = (
         "已啟用"
         if SETTINGS.confession_ai_available
@@ -9361,7 +9401,7 @@ async def monk_status(
     await interaction.response.send_message(
         "修士目前在線。\n\n"
         "玩家操作方式：**`/學生資料`、`/城下町`、`/今日穿搭推薦`**\n"
-        "公開斜線指令數量：**6**\n"
+        f"公開斜線指令數量：**{command_count}**\n"
         f"AI 告解：**{confession_ai_status}**\n"
         f"AI 神諭：**{oracle_ai_status}**\n"
         "學籍資料庫：**已啟用**\n"

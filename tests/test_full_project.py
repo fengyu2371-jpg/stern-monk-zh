@@ -9,6 +9,7 @@ import unittest
 from contextlib import closing
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -60,13 +61,33 @@ class FakeFollowup:
 
 
 class FakeInteraction:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        user_id: int = 1001,
+        message: object | None = None,
+    ) -> None:
         self.response = FakeResponse()
         self.followup = FakeFollowup()
         self.original_edits: list[dict[str, object]] = []
+        self.user = SimpleNamespace(
+            id=int(user_id),
+            display_name="測試玩家",
+        )
+        self.message = message
+        self.channel_id = 123456789
 
     async def edit_original_response(self, **kwargs: object) -> None:
         self.original_edits.append(kwargs)
+
+
+class FakeMessage:
+    def __init__(self, message_id: int = 987654321) -> None:
+        self.id = int(message_id)
+        self.edits: list[dict[str, object]] = []
+
+    async def edit(self, **kwargs: object) -> None:
+        self.edits.append(kwargs)
 
 
 class DatabaseCase(unittest.TestCase):
@@ -135,8 +156,11 @@ class ProjectStaticTests(DatabaseCase):
         )
         self.assertEqual(
             [command.name for command in main.tree.get_commands()],
-            ["學生資料", "我的", "城下町", "今日穿搭推薦", "下載目前備份", "修士狀態"],
+            ["學生資料", "城下町", "今日穿搭推薦", "下載目前備份", "修士狀態"],
         )
+        source = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertNotIn('name="我的"', source)
+        self.assertNotIn("公開斜線指令數量：**6**", source)
 
     def test_railway_and_requirements(self) -> None:
         railway = (PROJECT_ROOT / "railway.toml").read_text(encoding="utf-8")
@@ -804,6 +828,124 @@ class PlayerAndTransactionTests(DatabaseCase):
 
 
 class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
+    def test_player_panel_views_share_one_canonical_timeout(self) -> None:
+        self.assertEqual(main.PLAYER_PANEL_TIMEOUT_SECONDS, 300)
+        for view in (
+            main.StudentHubView(self.user_id),
+            main.TownHubView(self.user_id),
+            main.OracleHubView(self.user_id),
+            main.PlayerPanelHomeView(self.user_id),
+        ):
+            self.assertIsNone(view.timeout)
+
+    async def test_player_panel_session_expiry_removes_all_components(self) -> None:
+        message = FakeMessage()
+        session = main.PlayerPanelSession(
+            owner_id=self.user_id,
+            owner_name="測試玩家",
+            message=message,
+        )
+        main.ACTIVE_PLAYER_PANELS[self.user_id] = session
+        try:
+            with mock.patch.object(
+                main.asyncio,
+                "sleep",
+                new=mock.AsyncMock(),
+            ):
+                await session._expire()
+
+            self.assertIsNone(main.current_player_panel(self.user_id))
+            self.assertEqual(len(message.edits), 1)
+            self.assertIsNone(message.edits[0]["view"])
+            self.assertEqual(message.edits[0]["attachments"], [])
+            self.assertIn("操作畫面已鎖定", message.edits[0]["embed"].title)
+        finally:
+            main.ACTIVE_PLAYER_PANELS.pop(self.user_id, None)
+
+    async def test_expired_confession_modal_is_rejected_without_processing(self) -> None:
+        message_id = 123456
+        modal = main.ConfessionModal(
+            user_id=self.user_id,
+            source_message_id=message_id,
+        )
+        interaction = FakeInteraction(user_id=self.user_id)
+        main.ACTIVE_PLAYER_PANELS.pop(self.user_id, None)
+
+        with (
+            mock.patch.object(
+                main.ACADEMY_DB,
+                "get_player_panel",
+                return_value=None,
+            ),
+            mock.patch.object(
+                main,
+                "_handle_confession",
+                new=mock.AsyncMock(),
+            ) as handler,
+        ):
+            await modal.on_submit(interaction)
+
+        handler.assert_not_awaited()
+        self.assertTrue(interaction.response.messages)
+        self.assertIn(
+            "已關閉或已被新面板取代",
+            str(interaction.response.messages[0][0][0]),
+        )
+
+    async def test_expired_outfit_modal_does_not_consume_daily_usage(self) -> None:
+        flow_view = main.OutfitDirectionView(self.user_id)
+        flow_view.close_flow()
+        modal = main.OutfitKeywordModal(
+            user_id=self.user_id,
+            direction_key="neutral",
+            source_message=None,
+            flow_view=flow_view,
+        )
+        interaction = FakeInteraction(user_id=self.user_id)
+
+        with mock.patch.object(
+            main.ACADEMY_DB,
+            "try_reserve_usage",
+            side_effect=AssertionError("逾時表單不應扣除使用次數"),
+        ):
+            await modal.on_submit(interaction)
+
+        self.assertTrue(interaction.response.messages)
+        self.assertIn(
+            "沒有扣除今日使用次數",
+            str(interaction.response.messages[0][0][0]),
+        )
+
+    async def test_ai_confession_keeps_player_panel_unchanged(self) -> None:
+        interaction = FakeInteraction(user_id=self.user_id)
+        settings = SimpleNamespace(
+            confession_ai_available=True,
+            ai_daily_limit=3,
+        )
+        with (
+            mock.patch.object(main, "openai_client", object()),
+            mock.patch.object(main, "SETTINGS", settings),
+            mock.patch.object(
+                main.ACADEMY_DB,
+                "try_reserve_usage",
+                return_value=1,
+            ),
+            mock.patch.object(
+                main,
+                "ask_openai_confession",
+                new=mock.AsyncMock(return_value="請先整理今天能完成的一步。"),
+            ),
+        ):
+            await main._handle_confession(
+                interaction,
+                "我想整理一下今天發生的事情。",
+            )
+
+        self.assertTrue(interaction.response.done)
+        self.assertEqual(interaction.response.edits, [])
+        self.assertEqual(len(interaction.followup.messages), 1)
+        self.assertTrue(interaction.followup.messages[0][1]["ephemeral"])
+
     def test_ranch_embed_explains_location_and_next_action(self) -> None:
         self.set_player(coins=5000)
         self.set_tool("farm_tools", 2)
