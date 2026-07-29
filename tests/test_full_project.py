@@ -440,6 +440,64 @@ class PlayerAndTransactionTests(DatabaseCase):
         eaten = self.db.eat_food(self.user_id, "grilled_fish")
         self.assertGreater(int(eaten["stamina_restored"]) + int(eaten["spirit_restored"]), 0)
 
+    def test_food_is_not_consumed_when_daily_stamina_limit_is_full(self) -> None:
+        self.set_player(
+            stamina=1,
+            spirit=50,
+            stamina_updated_at=town_life.now_iso(),
+            food_stamina_date=town_life.today_key(),
+            food_stamina_recovered=town_life.MAX_DAILY_FOOD_STAMINA,
+        )
+        self.add_item("grilled_fish", 1)
+        before = self.db.get_snapshot(self.user_id)
+
+        with self.assertRaisesRegex(TownLifeError, "已替你保留"):
+            self.db.eat_food(self.user_id, "grilled_fish")
+
+        after = self.db.get_snapshot(self.user_id)
+        self.assertEqual(after["inventory"]["grilled_fish"], 1)
+        self.assertEqual(after["player"]["stamina"], before["player"]["stamina"])
+        self.assertEqual(after["player"]["spirit"], before["player"]["spirit"])
+
+    def test_food_can_use_the_remaining_daily_stamina_allowance(self) -> None:
+        self.set_player(
+            stamina=1,
+            spirit=50,
+            stamina_updated_at=town_life.now_iso(),
+            food_stamina_date=town_life.today_key(),
+            food_stamina_recovered=town_life.MAX_DAILY_FOOD_STAMINA - 10,
+        )
+        self.add_item("grilled_fish", 1)
+
+        result = self.db.eat_food(self.user_id, "grilled_fish")
+
+        self.assertEqual(result["stamina_restored"], 10)
+        self.assertEqual(result["spirit_restored"], 12)
+        self.assertEqual(result["stamina_daily_remaining"], 0)
+        self.assertEqual(
+            self.db.get_snapshot(self.user_id)["inventory"].get("grilled_fish", 0),
+            0,
+        )
+
+    def test_food_still_restores_spirit_when_stamina_itself_is_full(self) -> None:
+        self.set_player(
+            stamina=1000,
+            spirit=50,
+            stamina_updated_at=town_life.now_iso(),
+            food_stamina_date=town_life.today_key(),
+            food_stamina_recovered=town_life.MAX_DAILY_FOOD_STAMINA,
+        )
+        self.add_item("grilled_fish", 1)
+
+        result = self.db.eat_food(self.user_id, "grilled_fish")
+
+        self.assertEqual(result["stamina_restored"], 0)
+        self.assertEqual(result["spirit_restored"], 12)
+        self.assertEqual(
+            self.db.get_snapshot(self.user_id)["inventory"].get("grilled_fish", 0),
+            0,
+        )
+
 
 class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
     def test_ranch_embed_explains_location_and_next_action(self) -> None:
@@ -618,6 +676,39 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(view.previous_page.disabled)
         self.assertTrue(view.next_page.disabled)
         self.assertTrue(view.details.disabled)
+
+    def test_backpack_disables_food_when_daily_stamina_limit_is_full(self) -> None:
+        self.set_player(
+            stamina=1,
+            spirit=50,
+            stamina_updated_at=town_life.now_iso(),
+            food_stamina_date=town_life.today_key(),
+            food_stamina_recovered=town_life.MAX_DAILY_FOOD_STAMINA,
+        )
+        self.add_item("grilled_fish", 1)
+        snapshot = self.db.get_snapshot(self.user_id)
+
+        view = main.InventoryMarketView(
+            self.user_id,
+            selected_item_key="grilled_fish",
+            category="food",
+            snapshot=snapshot,
+        )
+        eat_button = next(
+            child
+            for child in view.children
+            if isinstance(child, main.discord.ui.Button)
+            and child.label == "今日回體已達上限"
+        )
+        self.assertTrue(eat_button.disabled)
+
+        embed = main.inventory_market_embed(
+            self.user_id,
+            selected_item_key="grilled_fish",
+            category="food",
+            snapshot=snapshot,
+        )
+        self.assertIn("**今日料理可回體**：0／600", embed.description)
 
     def test_backpack_multiple_pages_and_categories(self) -> None:
         food_keys = list(FOOD_RECIPE_CONFIG)[:6]
