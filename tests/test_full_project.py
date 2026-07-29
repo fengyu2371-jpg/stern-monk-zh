@@ -442,6 +442,103 @@ class PlayerAndTransactionTests(DatabaseCase):
 
 
 class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
+    def test_ranch_embed_explains_location_and_next_action(self) -> None:
+        self.set_player(coins=5000)
+        self.set_tool("farm_tools", 2)
+        self.add_item("animal_feed", 3)
+        self.transaction(
+            (
+                "UPDATE town_life_animals SET quantity = 2, last_collect_date = '' "
+                "WHERE user_id = ? AND animal_key = 'chicken'",
+                (str(self.user_id),),
+            ),
+            (
+                "UPDATE town_life_animals SET quantity = 1, last_collect_date = '' "
+                "WHERE user_id = ? AND animal_key = 'cow'",
+                (str(self.user_id),),
+            ),
+        )
+
+        embed = main.ranch_embed(self.user_id)
+        self.assertIn("城下町 › 農牧師 › 畜牧場", embed.description)
+        self.assertIn("**下一步**", embed.description)
+        self.assertIn("「收雞蛋 ×2」", embed.description)
+        self.assertIn("「擠牛奶 ×1」", embed.description)
+        self.assertIn("雞 2／10｜可收雞蛋 ×2", embed.description)
+        self.assertIn("牛 1／10｜可收牛奶 ×1", embed.description)
+        self.assertEqual(embed.image.url, "attachment://ranch.webp")
+
+        compact = main.ranch_embed(
+            self.user_id,
+            notice="測試完成。",
+            item_key="egg",
+        )
+        self.assertIsNone(compact.image.url)
+        self.assertEqual(compact.thumbnail.url, "attachment://egg.png")
+        self.assertIn("✅ 測試完成。", compact.description)
+
+        self.set_player(coins=100)
+        self.set_tool("farm_tools", 1)
+        self.transaction(
+            (
+                "UPDATE town_life_animals SET quantity = 0, last_collect_date = '' "
+                "WHERE user_id = ?",
+                (str(self.user_id),),
+            )
+        )
+        insufficient_coins = main.ranch_embed(self.user_id)
+        self.assertIn("先準備 600 麻瓜幣", insufficient_coins.description)
+
+    def test_ranch_view_buttons_explain_requirements_and_daily_state(self) -> None:
+        locked = main.RanchView(self.user_id)
+        self.assertTrue(locked.buy_chicken.disabled)
+        self.assertEqual(locked.buy_chicken.label, "買雞｜需農具 Lv.1")
+        self.assertTrue(locked.buy_cow.disabled)
+        self.assertEqual(locked.buy_cow.label, "買牛｜需農具 Lv.2")
+        self.assertTrue(locked.collect_eggs.disabled)
+        self.assertEqual(locked.collect_eggs.label, "雞蛋｜尚無雞")
+        self.assertTrue(any(child.label == "城下町首頁" for child in locked.children))
+
+        self.set_player(coins=5000)
+        self.set_tool("farm_tools", 2)
+        self.add_item("animal_feed", 3)
+        self.transaction(
+            (
+                "UPDATE town_life_animals SET quantity = 2, last_collect_date = '' "
+                "WHERE user_id = ? AND animal_key = 'chicken'",
+                (str(self.user_id),),
+            ),
+            (
+                "UPDATE town_life_animals SET quantity = 1, last_collect_date = '' "
+                "WHERE user_id = ? AND animal_key = 'cow'",
+                (str(self.user_id),),
+            ),
+        )
+        ready = main.RanchView(self.user_id)
+        self.assertFalse(ready.collect_eggs.disabled)
+        self.assertEqual(ready.collect_eggs.label, "收雞蛋 ×2")
+        self.assertFalse(ready.collect_milk.disabled)
+        self.assertEqual(ready.collect_milk.label, "擠牛奶 ×1")
+        self.assertEqual(ready.buy_feed.label, "買飼料 ×10｜150")
+
+        self.transaction(
+            (
+                "UPDATE town_life_animals SET last_collect_date = ? "
+                "WHERE user_id = ? AND animal_key = 'chicken'",
+                (town_life.today_key(), str(self.user_id)),
+            ),
+            (
+                "DELETE FROM town_life_inventory "
+                "WHERE user_id = ? AND item_key = 'animal_feed'",
+                (str(self.user_id),),
+            ),
+        )
+        unavailable = main.RanchView(self.user_id)
+        self.assertTrue(unavailable.collect_eggs.disabled)
+        self.assertEqual(unavailable.collect_eggs.label, "雞蛋｜今日已收")
+        self.assertTrue(unavailable.collect_milk.disabled)
+        self.assertEqual(unavailable.collect_milk.label, "牛奶｜缺飼料 1")
+
     async def test_same_view_mutation_gate_blocks_second_click(self) -> None:
         view = main.RanchView(self.user_id)
         first = FakeInteraction()
@@ -485,9 +582,33 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
         await view._collect(interaction, "chicken")
         edit = interaction.response.edits[0]
         self.assertEqual(edit["embed"].thumbnail.url, "attachment://egg.png")
+        self.assertIsNone(edit["embed"].image.url)
+        self.assertIn("**下一步**", edit["embed"].description)
         filenames = [file.filename for file in edit["attachments"]]
         self.assertIn("egg.png", filenames)
         self.assertNotIn("animal_feed.png", filenames)
+        self.assertNotIn("ranch.webp", filenames)
+        for file in edit["attachments"]:
+            file.close()
+
+    async def test_purchase_screen_is_compact_and_guides_the_player(self) -> None:
+        self.set_player(coins=5000)
+        self.set_tool("farm_tools", 1)
+        view = main.RanchView(self.user_id)
+        interaction = FakeInteraction()
+
+        await view._buy_animal(interaction, "chicken")
+
+        edit = interaction.response.edits[0]
+        self.assertIsNone(edit["embed"].image.url)
+        self.assertEqual(edit["embed"].thumbnail.url, "attachment://egg.png")
+        self.assertIn("日後可採收雞蛋", edit["embed"].description)
+        self.assertIn("先按「買飼料 ×10」", edit["embed"].description)
+        filenames = [file.filename for file in edit["attachments"]]
+        self.assertEqual(filenames, ["egg.png"])
+        refreshed = edit["view"]
+        self.assertTrue(refreshed.collect_eggs.disabled)
+        self.assertEqual(refreshed.collect_eggs.label, "雞蛋｜缺飼料 1")
         for file in edit["attachments"]:
             file.close()
 

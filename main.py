@@ -6324,25 +6324,109 @@ def farm_embed(user_id: int, *, notice: str = "", item_key: str = "") -> discord
     return _town_life_embed_with_item_thumbnail(embed, item_key)
 
 
+def _ranch_animal_status(
+    animal: dict[str, Any],
+    animal_key: str,
+    *,
+    feed_quantity: int,
+    today: str,
+) -> str:
+    quantity = int(animal["quantity"])
+    product_name = str(ANIMAL_CONFIG[animal_key]["product_name"])
+    if quantity <= 0:
+        return "尚未飼養"
+    if str(animal["last_collect_date"]) == today:
+        return "今日已完成"
+    if feed_quantity < quantity:
+        return f"缺 {quantity - feed_quantity} 份飼料"
+    return f"可收{product_name} ×{quantity}"
+
+
+def _ranch_next_action(
+    *,
+    chicken: dict[str, Any],
+    cow: dict[str, Any],
+    feed_quantity: int,
+    tool_level: int,
+    coins: int,
+    today: str,
+) -> tuple[str, int]:
+    pending: list[tuple[str, int]] = []
+    for animal_key, animal in (("chicken", chicken), ("cow", cow)):
+        quantity = int(animal["quantity"])
+        if quantity > 0 and str(animal["last_collect_date"]) != today:
+            pending.append((animal_key, quantity))
+
+    remaining_feed_need = sum(quantity for _, quantity in pending)
+    if pending:
+        if feed_quantity < remaining_feed_need:
+            missing = remaining_feed_need - feed_quantity
+            feed_bundle_cost = int(ITEM_CONFIG["animal_feed"]["buy"]) * 10
+            if coins < feed_bundle_cost:
+                return (
+                    f"今天全部採收還缺 {missing} 份飼料；"
+                    f"請先準備至少 {feed_bundle_cost} 麻瓜幣，再購買飼料。",
+                    remaining_feed_need,
+                )
+            return (
+                f"先按「買飼料 ×10」；完成今天全部採收尚需 "
+                f"{remaining_feed_need} 份，目前還缺 {missing} 份。",
+                remaining_feed_need,
+            )
+        actions = [
+            f"「{'收雞蛋' if animal_key == 'chicken' else '擠牛奶'} ×{quantity}」"
+            for animal_key, quantity in pending
+        ]
+        return f"飼料足夠，請依序按{'、'.join(actions)}。", remaining_feed_need
+
+    if int(chicken["quantity"]) > 0 or int(cow["quantity"]) > 0:
+        return "今天的畜牧採收已完成；可以前往農牧工坊或返回農田。", 0
+    if tool_level < 1:
+        return "先前往「農牧工坊」取得農具組 Lv.1，再回來購買第一隻雞。", 0
+    chicken_cost = int(ANIMAL_CONFIG["chicken"]["cost"])
+    if coins < chicken_cost:
+        return f"先準備 {chicken_cost} 麻瓜幣，再回來購買第一隻雞。", 0
+    return "牧場目前沒有動物；可以先按「買雞｜600」開始飼養。", 0
+
+
 def ranch_embed(user_id: int, *, notice: str = "", item_key: str = "") -> discord.Embed:
     snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
     animals = snapshot["animals"]
     inventory = snapshot["inventory"]
     chicken = animals.get("chicken", {"quantity": 0, "last_collect_date": ""})
     cow = animals.get("cow", {"quantity": 0, "last_collect_date": ""})
+    feed_quantity = int(inventory.get("animal_feed", 0))
+    tool_level = int(snapshot["tools"].get("farm_tools", 0))
+    coins = int(snapshot["player"]["coins"])
+    today = taipei_today().isoformat()
+    next_action, remaining_feed_need = _ranch_next_action(
+        chicken=chicken,
+        cow=cow,
+        feed_quantity=feed_quantity,
+        tool_level=tool_level,
+        coins=coins,
+        today=today,
+    )
     description = (
-        f"**雞**：{int(chicken['quantity'])} 隻｜價格 {ANIMAL_CONFIG['chicken']['cost']}\n"
-        f"**牛**：{int(cow['quantity'])} 隻｜價格 {ANIMAL_CONFIG['cow']['cost']}\n"
-        f"**飼料**：{int(inventory.get('animal_feed', 0))} 份\n"
-        f"**麻瓜幣**：{int(snapshot['player']['coins'])}\n"
-        f"**精神力**：{int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}\n\n"
-        "雞需要農具組 Lv.1，牛需要農具組 Lv.2。"
-        "每隻動物每天消耗一份飼料，並可採收一份雞蛋或牛奶。"
+        "**位置**　城下町 › 農牧師 › 畜牧場\n\n"
+        f"**下一步**\n{next_action}\n\n"
+        "**今日狀態**\n"
+        f"🐔 雞 {int(chicken['quantity'])}／10｜"
+        f"{_ranch_animal_status(chicken, 'chicken', feed_quantity=feed_quantity, today=today)}\n"
+        f"🐄 牛 {int(cow['quantity'])}／10｜"
+        f"{_ranch_animal_status(cow, 'cow', feed_quantity=feed_quantity, today=today)}\n\n"
+        "**持有資源**\n"
+        f"飼料 {feed_quantity} 份｜今日尚需 {remaining_feed_need} 份\n"
+        f"麻瓜幣 {coins}｜農具組 Lv.{tool_level}\n"
+        f"精神力 {int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}\n\n"
+        f"購買價格：雞 {ANIMAL_CONFIG['chicken']['cost']}（農具 Lv.1）｜"
+        f"牛 {ANIMAL_CONFIG['cow']['cost']}（農具 Lv.2）"
     )
     if notice:
-        description = f"**本次結果**\n{notice}\n\n{description}"
+        description = f"**本次結果**\n✅ {notice}\n\n{description}"
     embed = monk_embed("農牧師｜畜牧場", description, color=0xA07B4F)
-    embed = _town_life_embed_with_image(embed, "ranch")
+    if not notice:
+        embed = _town_life_embed_with_image(embed, "ranch")
     return _town_life_embed_with_item_thumbnail(embed, item_key)
 
 
@@ -7138,6 +7222,72 @@ class FarmRouteView(UserOwnedView):
 class RanchView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
         super().__init__(owner_id, timeout=900, add_home_button=False)
+        snapshot = TOWN_LIFE_DB.get_snapshot(owner_id)
+        self._configure_buttons(snapshot)
+
+    def _configure_buttons(self, snapshot: dict[str, Any]) -> None:
+        animals = snapshot["animals"]
+        inventory = snapshot["inventory"]
+        coins = int(snapshot["player"]["coins"])
+        tool_level = int(snapshot["tools"].get("farm_tools", 0))
+        feed_quantity = int(inventory.get("animal_feed", 0))
+        today = taipei_today().isoformat()
+
+        for animal_key, button in (
+            ("chicken", self.buy_chicken),
+            ("cow", self.buy_cow),
+        ):
+            config = ANIMAL_CONFIG[animal_key]
+            animal_name = str(config["name"])
+            quantity = int(animals[animal_key]["quantity"])
+            required_tool = int(config["required_tool_level"])
+            cost = int(config["cost"])
+            button.disabled = True
+            button.style = discord.ButtonStyle.secondary
+            if quantity >= 10:
+                button.label = f"{animal_name}已達 10 隻上限"
+            elif tool_level < required_tool:
+                button.label = f"買{animal_name}｜需農具 Lv.{required_tool}"
+            elif coins < cost:
+                button.label = f"買{animal_name}｜麻瓜幣不足"
+            else:
+                button.label = f"買{animal_name}｜{cost}"
+                button.disabled = False
+                button.style = discord.ButtonStyle.success
+
+        feed_cost = int(ITEM_CONFIG["animal_feed"]["buy"]) * 10
+        self.buy_feed.disabled = coins < feed_cost
+        self.buy_feed.style = (
+            discord.ButtonStyle.secondary
+            if self.buy_feed.disabled
+            else discord.ButtonStyle.success
+        )
+        self.buy_feed.label = (
+            "買飼料｜麻瓜幣不足"
+            if self.buy_feed.disabled
+            else f"買飼料 ×10｜{feed_cost}"
+        )
+
+        for animal_key, button in (
+            ("chicken", self.collect_eggs),
+            ("cow", self.collect_milk),
+        ):
+            animal = animals[animal_key]
+            quantity = int(animal["quantity"])
+            product_label = "雞蛋" if animal_key == "chicken" else "牛奶"
+            action_label = "收雞蛋" if animal_key == "chicken" else "擠牛奶"
+            button.disabled = True
+            button.style = discord.ButtonStyle.secondary
+            if quantity <= 0:
+                button.label = f"{product_label}｜尚無{ANIMAL_CONFIG[animal_key]['name']}"
+            elif str(animal["last_collect_date"]) == today:
+                button.label = f"{product_label}｜今日已收"
+            elif feed_quantity < quantity:
+                button.label = f"{product_label}｜缺飼料 {quantity - feed_quantity}"
+            else:
+                button.label = f"{action_label} ×{quantity}"
+                button.disabled = False
+                button.style = discord.ButtonStyle.primary
 
     async def _buy_animal(self, interaction: discord.Interaction, animal_key: str) -> None:
         if not await _town_life_begin_action(self, interaction):
@@ -7153,11 +7303,12 @@ class RanchView(UserOwnedView):
         notice = (
             f"購買 1 隻{animal['name']}，支付 {int(result['cost'])} 麻瓜幣；"
             f"目前共 {int(result['quantity'])} 隻。"
+            f"日後可採收{animal['product_name']}。"
         )
         product_item_key = str(result["product"])
         await interaction.response.edit_message(
             embed=ranch_embed(self.owner_id, notice=notice, item_key=product_item_key),
-            attachments=town_life_display_attachments(route_key="ranch", item_key=product_item_key),
+            attachments=town_life_item_attachments(product_item_key),
             view=RanchView(self.owner_id),
         )
 
@@ -7179,22 +7330,19 @@ class RanchView(UserOwnedView):
         product_item_key = str(result["product"])
         await interaction.response.edit_message(
             embed=ranch_embed(self.owner_id, notice=notice, item_key=product_item_key),
-            attachments=town_life_display_attachments(
-                route_key="ranch",
-                item_key=product_item_key,
-            ),
+            attachments=town_life_item_attachments(product_item_key),
             view=RanchView(self.owner_id),
         )
 
-    @discord.ui.button(label="購買雞", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="買雞｜600", style=discord.ButtonStyle.success, row=1)
     async def buy_chicken(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self._buy_animal(interaction, "chicken")
 
-    @discord.ui.button(label="購買牛", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="買牛｜1500", style=discord.ButtonStyle.success, row=1)
     async def buy_cow(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self._buy_animal(interaction, "cow")
 
-    @discord.ui.button(label="購買飼料 ×10", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="買飼料 ×10｜150", style=discord.ButtonStyle.success, row=1)
     async def buy_feed(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not await _town_life_begin_action(self, interaction):
             return
@@ -7208,15 +7356,15 @@ class RanchView(UserOwnedView):
         notice = f"購買飼料×10，支付 {int(result['cost'])} 麻瓜幣。"
         await interaction.response.edit_message(
             embed=ranch_embed(self.owner_id, notice=notice),
-            attachments=town_life_route_attachments("ranch"),
+            attachments=[],
             view=RanchView(self.owner_id),
         )
 
-    @discord.ui.button(label="收雞蛋", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="收雞蛋", style=discord.ButtonStyle.primary, row=0)
     async def collect_eggs(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self._collect(interaction, "chicken")
 
-    @discord.ui.button(label="擠牛奶", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="擠牛奶", style=discord.ButtonStyle.primary, row=0)
     async def collect_milk(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self._collect(interaction, "cow")
 
@@ -7234,6 +7382,14 @@ class RanchView(UserOwnedView):
             embed=farm_embed(self.owner_id),
             attachments=town_life_route_attachments("farming"),
             view=FarmRouteView(self.owner_id),
+        )
+
+    @discord.ui.button(label="城下町首頁", style=discord.ButtonStyle.secondary, row=3)
+    async def home(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=town_life_home_embed(self.owner_id),
+            attachments=[],
+            view=TownLifeHubView(self.owner_id),
         )
 
 
