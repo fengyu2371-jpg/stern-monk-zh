@@ -21,6 +21,11 @@ MAX_SPIRIT = 100
 MAX_DAILY_FOOD_STAMINA = 600
 STAMINA_RECOVERY_PER_MINUTE = 1
 TOOL_UPGRADE_SPIRIT_COSTS = (0, 0, 3, 5, 8)
+MAINTENANCE_MAIL_KEY = "maintenance_2026_07_29_stamina_potion"
+MAINTENANCE_MAIL_TITLE = "城下町維護補償"
+MAINTENANCE_MAIL_BODY = "感謝等待本次城下町維護，請收下專用體力藥水。"
+MAINTENANCE_MAIL_ITEM_KEY = "maintenance_stamina_potion"
+MAINTENANCE_MAIL_QUANTITY = 1
 
 
 class TownLifeError(RuntimeError):
@@ -221,6 +226,11 @@ ITEM_CONFIG: dict[str, dict[str, Any]] = {
     "silver_carp_steak": {"name": "香煎銀鱗鯉", "sell": 0, "category": "food"},
     "moon_trout_platter": {"name": "月光鱒套餐", "sell": 0, "category": "food"},
     "stamina_potion": {"name": "體力藥水", "buy": 250, "sell": 0, "category": "other"},
+    "maintenance_stamina_potion": {
+        "name": "維護補償體力藥水",
+        "sell": 0,
+        "category": "other",
+    },
 }
 
 
@@ -325,6 +335,10 @@ FOOD_RECIPE_CONFIG: dict[str, dict[str, Any]] = {
 POTION_CONFIG: dict[str, dict[str, Any]] = {
     "stamina_potion": {
         "name": "體力藥水",
+        "stamina_restore": 250,
+    },
+    "maintenance_stamina_potion": {
+        "name": "維護補償體力藥水",
         "stamina_restore": 250,
     },
 }
@@ -460,8 +474,29 @@ class TownLifeDatabase:
                     PRIMARY KEY (user_id, animal_key)
                 );
 
+                CREATE TABLE IF NOT EXISTS town_life_mailbox (
+                    user_id TEXT NOT NULL,
+                    mail_key TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    claimed_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, mail_key)
+                );
+
+                CREATE TABLE IF NOT EXISTS town_life_system_markers (
+                    marker_key TEXT PRIMARY KEY,
+                    marker_value TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_town_life_inventory_user
                 ON town_life_inventory(user_id);
+
+                CREATE INDEX IF NOT EXISTS idx_town_life_mailbox_user_claimed
+                ON town_life_mailbox(user_id, claimed_at);
                 """
             )
 
@@ -511,6 +546,13 @@ class TownLifeDatabase:
                     "user_id", "animal_key", "quantity",
                     "last_collect_date", "updated_at",
                 },
+                "town_life_mailbox": {
+                    "user_id", "mail_key", "title", "body", "item_key",
+                    "quantity", "claimed_at", "created_at",
+                },
+                "town_life_system_markers": {
+                    "marker_key", "marker_value", "updated_at",
+                },
             }
             missing_schema: list[str] = []
             for table_name, expected in required_schema.items():
@@ -545,7 +587,106 @@ class TownLifeDatabase:
                 """,
                 (MAX_STAMINA, MAX_STAMINA, MAX_STAMINA, now, MAX_STAMINA),
             )
+            self._seed_maintenance_compensation(conn)
             conn.commit()
+
+    @staticmethod
+    def _insert_mail(
+        conn: sqlite3.Connection,
+        user_id: int | str,
+        mail_key: str,
+        title: str,
+        body: str,
+        item_key: str,
+        quantity: int,
+        created_at: str,
+    ) -> bool:
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO town_life_mailbox (
+                user_id, mail_key, title, body, item_key,
+                quantity, claimed_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, '', ?)
+            """,
+            (
+                str(user_id),
+                mail_key,
+                title,
+                body,
+                item_key,
+                int(quantity),
+                created_at,
+            ),
+        )
+        return cursor.rowcount > 0
+
+    def _seed_maintenance_compensation(self, conn: sqlite3.Connection) -> int:
+        marker_key = f"mail_issued:{MAINTENANCE_MAIL_KEY}"
+        marker = conn.execute(
+            "SELECT marker_key FROM town_life_system_markers WHERE marker_key = ?",
+            (marker_key,),
+        ).fetchone()
+        if marker is not None:
+            return 0
+
+        now = now_iso()
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO town_life_mailbox (
+                user_id, mail_key, title, body, item_key,
+                quantity, claimed_at, created_at
+            )
+            SELECT user_id, ?, ?, ?, ?, ?, '', ?
+            FROM town_life_players
+            """,
+            (
+                MAINTENANCE_MAIL_KEY,
+                MAINTENANCE_MAIL_TITLE,
+                MAINTENANCE_MAIL_BODY,
+                MAINTENANCE_MAIL_ITEM_KEY,
+                MAINTENANCE_MAIL_QUANTITY,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO town_life_system_markers (
+                marker_key, marker_value, updated_at
+            ) VALUES (?, ?, ?)
+            """,
+            (marker_key, str(max(0, cursor.rowcount)), now),
+        )
+        return max(0, cursor.rowcount)
+
+    def issue_mail(
+        self,
+        user_id: int,
+        *,
+        mail_key: str,
+        title: str,
+        body: str,
+        item_key: str,
+        quantity: int,
+    ) -> bool:
+        if item_key not in ITEM_CONFIG:
+            raise TownLifeError("信件獎勵道具不存在。")
+        if int(quantity) <= 0:
+            raise TownLifeError("信件獎勵數量必須大於零。")
+        with closing(self.connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._ensure_player(conn, user_id)
+            inserted = self._insert_mail(
+                conn,
+                user_id,
+                mail_key,
+                title,
+                body,
+                item_key,
+                quantity,
+                now_iso(),
+            )
+            conn.commit()
+        return inserted
 
     def _ensure_player(self, conn: sqlite3.Connection, user_id: int) -> None:
         uid = str(user_id)
@@ -870,6 +1011,20 @@ class TownLifeDatabase:
                     (str(user_id),),
                 ).fetchall()
             }
+            mailbox = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT mail_key, title, body, item_key, quantity,
+                           claimed_at, created_at
+                    FROM town_life_mailbox
+                    WHERE user_id = ?
+                    ORDER BY CASE WHEN claimed_at = '' THEN 0 ELSE 1 END,
+                             created_at DESC, mail_key
+                    """,
+                    (str(user_id),),
+                ).fetchall()
+            ]
             conn.commit()
         return {
             "player": dict(player_row),
@@ -878,6 +1033,50 @@ class TownLifeDatabase:
             "inventory": inventory,
             "plots": plots,
             "animals": animals,
+            "mailbox": mailbox,
+        }
+
+    def claim_all_mail(self, user_id: int) -> dict[str, Any]:
+        with closing(self.connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._ensure_player(conn, user_id)
+            rows = conn.execute(
+                """
+                SELECT mail_key, item_key, quantity
+                FROM town_life_mailbox
+                WHERE user_id = ? AND claimed_at = ''
+                ORDER BY created_at, mail_key
+                """,
+                (str(user_id),),
+            ).fetchall()
+            if not rows:
+                raise TownLifeError("信箱目前沒有尚未領取的附件。")
+
+            rewards: dict[str, int] = {}
+            for row in rows:
+                item_key = str(row["item_key"])
+                quantity = int(row["quantity"])
+                if item_key not in ITEM_CONFIG or quantity <= 0:
+                    raise TownLifeError("信箱內有無法辨識的附件，請聯絡管理員。")
+                rewards[item_key] = rewards.get(item_key, 0) + quantity
+
+            for item_key, quantity in rewards.items():
+                self._change_inventory(conn, user_id, item_key, quantity)
+
+            claimed_at = now_iso()
+            conn.execute(
+                """
+                UPDATE town_life_mailbox
+                SET claimed_at = ?
+                WHERE user_id = ? AND claimed_at = ''
+                """,
+                (claimed_at, str(user_id)),
+            )
+            conn.commit()
+        return {
+            "claimed_count": len(rows),
+            "rewards": rewards,
+            "claimed_at": claimed_at,
         }
 
     def buy_or_upgrade_tool(self, user_id: int, tool_key: str) -> dict[str, Any]:
