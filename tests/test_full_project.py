@@ -258,6 +258,73 @@ class PlayerAndTransactionTests(DatabaseCase):
             ).fetchone()
         self.assertEqual((int(row["stamina"]), int(row["spirit"])), (1000, 17))
 
+    def test_stamina_recovers_one_point_per_complete_minute(self) -> None:
+        current_time = town_life.taipei_now().replace(
+            hour=12,
+            minute=0,
+            second=30,
+            microsecond=0,
+        )
+        updated_at = current_time - timedelta(minutes=5, seconds=30)
+        self.set_player(stamina=100, stamina_updated_at=updated_at.isoformat())
+
+        with mock.patch.object(town_life, "taipei_now", return_value=current_time):
+            snapshot = self.db.get_snapshot(self.user_id)
+
+        self.assertEqual(snapshot["player"]["stamina"], 105)
+        self.assertEqual(
+            snapshot["player"]["stamina_updated_at"],
+            (current_time - timedelta(seconds=30)).isoformat(timespec="seconds"),
+        )
+
+    def test_full_stamina_does_not_bank_recovery_time(self) -> None:
+        current_time = town_life.taipei_now().replace(
+            hour=12,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        self.set_player(
+            stamina=1000,
+            stamina_updated_at=(current_time - timedelta(hours=2)).isoformat(),
+        )
+
+        with mock.patch.object(town_life, "taipei_now", return_value=current_time):
+            snapshot = self.db.get_snapshot(self.user_id)
+
+        self.assertEqual(snapshot["player"]["stamina"], 1000)
+        self.assertEqual(
+            snapshot["player"]["stamina_updated_at"],
+            current_time.isoformat(timespec="seconds"),
+        )
+
+    def test_stamina_potion_restarts_natural_recovery_timer(self) -> None:
+        current_time = town_life.taipei_now().replace(
+            hour=12,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        self.set_player(
+            stamina=500,
+            stamina_updated_at=(current_time - timedelta(minutes=5)).isoformat(),
+        )
+        self.add_item("stamina_potion", 1)
+
+        with mock.patch.object(town_life, "taipei_now", return_value=current_time):
+            result = self.db.use_stamina_potion(self.user_id)
+
+        self.assertEqual(result["stamina"], 755)
+        with closing(self.db.connect()) as conn:
+            row = conn.execute(
+                "SELECT stamina_updated_at FROM town_life_players WHERE user_id = ?",
+                (str(self.user_id),),
+            ).fetchone()
+        self.assertEqual(
+            row["stamina_updated_at"],
+            current_time.isoformat(timespec="seconds"),
+        )
+
     def test_chicken_purchase_contract_and_balance(self) -> None:
         self.set_player(coins=5000)
         self.set_tool("farm_tools", 1)
