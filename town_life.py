@@ -1377,31 +1377,102 @@ class TownLifeDatabase:
             "spirit_cost": spirit_cost,
         }
 
-    def forage(self, user_id: int) -> dict[str, Any]:
+    def forage(
+        self,
+        user_id: int,
+        attempts: int = 1,
+        *,
+        stamina_budget: int | None = None,
+    ) -> dict[str, Any]:
+        requested = int(attempts)
+        maximum_attempts = 100 if stamina_budget is not None else 10
+        if requested < 1 or requested > maximum_attempts:
+            raise TownLifeError(
+                f"採集批次必須介於 1 到 {maximum_attempts} 次。"
+            )
+        budget = (
+            None
+            if stamina_budget is None
+            else max(1, int(stamina_budget))
+        )
+
         with closing(self.connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._ensure_player(conn, user_id)
-            self._spend_stamina(conn, user_id, 6)
+            player = self._refresh_stamina(conn, user_id)
+            stamina_per_attempt = 6
+            completed = min(
+                requested,
+                int(player["stamina"]) // stamina_per_attempt,
+                (
+                    requested
+                    if budget is None
+                    else budget // stamina_per_attempt
+                ),
+            )
+            if completed <= 0:
+                if int(player["stamina"]) < stamina_per_attempt:
+                    self._spend_stamina(conn, user_id, stamina_per_attempt)
+                raise TownLifeError("這次設定的體力預算不足以完成一次採集。")
+            stamina_cost = stamina_per_attempt * completed
+            self._spend_stamina(conn, user_id, stamina_cost)
             spirit_cost = 0
-            item_key = random.choices(
-                ["wild_berry", "wild_herb", "branch"],
-                weights=[50, 30, 20],
-                k=1,
-            )[0]
-            quantity = random.randint(1, 2)
-            self._change_inventory(conn, user_id, item_key, quantity)
-            level, exp = self._add_career_exp(conn, user_id, "fishing", 5)
+            rewards: dict[str, int] = {}
+            item_key = ""
+            for _ in range(completed):
+                item_key = random.choices(
+                    ["wild_berry", "wild_herb", "branch"],
+                    weights=[50, 30, 20],
+                    k=1,
+                )[0]
+                quantity = random.randint(1, 2)
+                rewards[item_key] = rewards.get(item_key, 0) + quantity
+            for reward_key, reward_quantity in rewards.items():
+                self._change_inventory(
+                    conn,
+                    user_id,
+                    reward_key,
+                    reward_quantity,
+                )
+            level, exp = self._add_career_exp(
+                conn,
+                user_id,
+                "fishing",
+                5 * completed,
+            )
             conn.commit()
         return {
             "item_key": item_key,
-            "quantity": quantity,
+            "quantity": rewards[item_key],
+            "rewards": rewards,
+            "attempts_requested": requested,
+            "attempts_completed": completed,
+            "stamina_budget": budget,
             "level": level,
             "exp": exp,
-            "stamina_cost": 6,
+            "stamina_cost": stamina_cost,
             "spirit_cost": spirit_cost,
         }
 
-    def fish(self, user_id: int) -> dict[str, Any]:
+    def fish(
+        self,
+        user_id: int,
+        attempts: int = 1,
+        *,
+        stamina_budget: int | None = None,
+    ) -> dict[str, Any]:
+        requested = int(attempts)
+        maximum_attempts = 100 if stamina_budget is not None else 10
+        if requested < 1 or requested > maximum_attempts:
+            raise TownLifeError(
+                f"釣魚批次必須介於 1 到 {maximum_attempts} 次。"
+            )
+        budget = (
+            None
+            if stamina_budget is None
+            else max(1, int(stamina_budget))
+        )
+
         with closing(self.connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._ensure_player(conn, user_id)
@@ -1412,7 +1483,22 @@ class TownLifeDatabase:
             tool_level = int(tool_row["level"] if tool_row is not None else 0)
             if tool_level <= 0:
                 raise TownLifeError("要先到對應工坊購買釣具組。")
-            stamina_cost = max(5, 10 - tool_level)
+            stamina_per_attempt = max(5, 10 - tool_level)
+            player = self._refresh_stamina(conn, user_id)
+            completed = min(
+                requested,
+                int(player["stamina"]) // stamina_per_attempt,
+                (
+                    requested
+                    if budget is None
+                    else budget // stamina_per_attempt
+                ),
+            )
+            if completed <= 0:
+                if int(player["stamina"]) < stamina_per_attempt:
+                    self._spend_stamina(conn, user_id, stamina_per_attempt)
+                raise TownLifeError("這次設定的體力預算不足以完成一次釣魚。")
+            stamina_cost = stamina_per_attempt * completed
             self._spend_stamina(conn, user_id, stamina_cost)
             spirit_cost = 0
             if tool_level == 1:
@@ -1421,25 +1507,71 @@ class TownLifeDatabase:
                 items, weights = ["river_fish", "silver_carp", "moon_trout", "old_boot"], [58, 28, 5, 9]
             else:
                 items, weights = ["river_fish", "silver_carp", "moon_trout", "old_boot"], [45, 35, 15 + tool_level, 5]
-            item_key = random.choices(items, weights=weights, k=1)[0]
-            quantity = 1 + (1 if tool_level >= 4 and random.random() < 0.25 else 0)
-            self._change_inventory(conn, user_id, item_key, quantity)
-            exp_gain = 4 if item_key == "old_boot" else (12 if item_key == "moon_trout" else 8)
-            level, exp = self._add_career_exp(conn, user_id, "fishing", exp_gain)
+            rewards: dict[str, int] = {}
+            exp_gain = 0
+            item_key = ""
+            for _ in range(completed):
+                item_key = random.choices(items, weights=weights, k=1)[0]
+                quantity = 1 + (
+                    1
+                    if tool_level >= 4 and random.random() < 0.25
+                    else 0
+                )
+                rewards[item_key] = rewards.get(item_key, 0) + quantity
+                exp_gain += (
+                    4
+                    if item_key == "old_boot"
+                    else (12 if item_key == "moon_trout" else 8)
+                )
+            for reward_key, reward_quantity in rewards.items():
+                self._change_inventory(
+                    conn,
+                    user_id,
+                    reward_key,
+                    reward_quantity,
+                )
+            level, exp = self._add_career_exp(
+                conn,
+                user_id,
+                "fishing",
+                exp_gain,
+            )
             conn.commit()
         return {
             "item_key": item_key,
-            "quantity": quantity,
+            "quantity": rewards[item_key],
+            "rewards": rewards,
+            "attempts_requested": requested,
+            "attempts_completed": completed,
+            "stamina_budget": budget,
             "stamina_cost": stamina_cost,
             "spirit_cost": spirit_cost,
             "level": level,
             "exp": exp,
         }
 
-    def mine(self, user_id: int, area_key: str = "outer_tunnel") -> dict[str, Any]:
+    def mine(
+        self,
+        user_id: int,
+        area_key: str = "outer_tunnel",
+        attempts: int = 1,
+        *,
+        stamina_budget: int | None = None,
+    ) -> dict[str, Any]:
         area = MINING_AREA_CONFIG.get(area_key)
         if area is None:
             raise TownLifeError("找不到這個礦區。")
+        requested = int(attempts)
+        maximum_attempts = 100 if stamina_budget is not None else 5
+        if requested < 1 or requested > maximum_attempts:
+            raise TownLifeError(
+                f"挖礦批次必須介於 1 到 {maximum_attempts} 次。"
+            )
+        budget = (
+            None
+            if stamina_budget is None
+            else max(1, int(stamina_budget))
+        )
 
         with closing(self.connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -1473,36 +1605,82 @@ class TownLifeDatabase:
                 int(area["minimum_stamina_cost"]),
                 int(area["base_stamina_cost"]) - efficiency,
             )
+            spirit_per_attempt = int(area["spirit_cost"])
+            player = self._refresh_stamina(conn, user_id)
+            affordable_by_stamina = int(player["stamina"]) // stamina_cost
+            affordable_by_budget = (
+                requested
+                if budget is None
+                else budget // stamina_cost
+            )
+            affordable_by_spirit = (
+                requested
+                if spirit_per_attempt <= 0
+                else int(player["spirit"]) // spirit_per_attempt
+            )
+            completed = min(
+                requested,
+                affordable_by_stamina,
+                affordable_by_budget,
+                affordable_by_spirit,
+            )
+            if completed <= 0:
+                if affordable_by_stamina <= 0:
+                    self._spend_stamina(conn, user_id, stamina_cost)
+                if affordable_by_spirit <= 0:
+                    self._spend_spirit(conn, user_id, spirit_per_attempt)
+                raise TownLifeError("這次設定的體力預算不足以完成一次挖礦。")
+            stamina_cost *= completed
+            spirit_cost = spirit_per_attempt * completed
             self._spend_stamina(conn, user_id, stamina_cost)
-            spirit_cost = int(area["spirit_cost"])
             self._spend_spirit(conn, user_id, spirit_cost)
 
             items = list(area["items"])
             weights = list(area["weights"])
-            item_key = random.choices(items, weights=weights, k=1)[0]
-            quantity = 1
-            if item_key == "stone":
-                quantity += random.randint(0, max(1, tool_level // 2))
-            elif item_key in {"copper_ore", "iron_ore"} and tool_level >= 4:
-                if random.random() < 0.25:
-                    quantity += 1
-            elif item_key == "raw_crystal" and tool_level >= 5:
-                if random.random() < 0.15:
-                    quantity += 1
+            rewards: dict[str, int] = {}
+            exp_gain = 0
+            item_key = ""
+            for _ in range(completed):
+                item_key = random.choices(items, weights=weights, k=1)[0]
+                quantity = 1
+                if item_key == "stone":
+                    quantity += random.randint(0, max(1, tool_level // 2))
+                elif item_key in {"copper_ore", "iron_ore"} and tool_level >= 4:
+                    if random.random() < 0.25:
+                        quantity += 1
+                elif item_key == "raw_crystal" and tool_level >= 5:
+                    if random.random() < 0.15:
+                        quantity += 1
+                rewards[item_key] = rewards.get(item_key, 0) + quantity
+                exp_gain += int(area["base_exp"])
+                if item_key == "iron_ore":
+                    exp_gain += 2
+                elif item_key == "raw_crystal":
+                    exp_gain += 5
 
-            self._change_inventory(conn, user_id, item_key, quantity)
-            exp_gain = int(area["base_exp"])
-            if item_key == "iron_ore":
-                exp_gain += 2
-            elif item_key == "raw_crystal":
-                exp_gain += 5
-            level, exp = self._add_career_exp(conn, user_id, "crystal", exp_gain)
+            for reward_key, reward_quantity in rewards.items():
+                self._change_inventory(
+                    conn,
+                    user_id,
+                    reward_key,
+                    reward_quantity,
+                )
+            level, exp = self._add_career_exp(
+                conn,
+                user_id,
+                "crystal",
+                exp_gain,
+            )
             conn.commit()
         return {
             "area_key": area_key,
             "area_name": str(area["name"]),
             "item_key": item_key,
-            "quantity": quantity,
+            "quantity": rewards[item_key],
+            "rewards": rewards,
+            "attempts_requested": requested,
+            "attempts_completed": completed,
+            "stamina_budget": budget,
             "stamina_cost": stamina_cost,
             "spirit_cost": spirit_cost,
             "level": level,
