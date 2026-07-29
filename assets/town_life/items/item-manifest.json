@@ -153,6 +153,10 @@
     {
       "filename": "stamina_potion.png",
       "name_zh_tw": "體力藥水"
+    },
+    {
+      "filename": "maintenance_stamina_potion.png",
+      "name_zh_tw": "維護補償體力藥水"
     }
   ]
 }
