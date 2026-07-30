@@ -2095,7 +2095,8 @@ class SafeModal(discord.ui.Modal):
 
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
-BUILD_VERSION = "2026-07-31-panel-lock-hardening-v9"
+PLAYER_PANEL_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
+BUILD_VERSION = "2026-07-31-panel-lock-direct-edit-v10"
 
 
 def locked_operation_embed(
@@ -2192,33 +2193,32 @@ def personal_panel_embed(
 
 
 async def lock_player_panel_message(
-    message: discord.Message,
+    message: discord.Message | discord.PartialMessage,
     *,
     owner_name: str,
     replaced: bool,
     restarted: bool = False,
 ) -> bool:
-    """Lock a panel through a bot-editable Message, retrying once."""
-    # InteractionMessage.edit() 依賴原斜線指令的 webhook 權杖。即使畫面仍在，
-    # 權杖過期或 Discord 未保留該互動時也可能無法更新。鎖定前先透過頻道
-    # 重新取得一般 Message，讓編輯改走 Bot 權杖並保持可長期運作。
-    editable_message = message
+    """Lock a panel with the bot token, without message-history access."""
+    # InteractionMessage.edit() 依賴原斜線指令的 webhook 權杖，時間一久便可能
+    # 失效。get_partial_message() 不會先讀取訊息，也不需要「讀取訊息歷史」
+    # 權限；它會直接用 Bot 權杖編輯指定訊息。
     channel = getattr(message, "channel", None)
-    fetch_message = getattr(channel, "fetch_message", None)
-    if callable(fetch_message):
+    get_partial_message = getattr(channel, "get_partial_message", None)
+    editable_message = message
+    if callable(get_partial_message):
         try:
-            editable_message = await fetch_message(int(message.id))
-        except discord.NotFound:
-            logger.info("待鎖定的玩家面板已不存在：message_id=%s", message.id)
-            return False
-        except (discord.Forbidden, discord.HTTPException):
+            editable_message = get_partial_message(int(message.id))
+        except (TypeError, ValueError):
             logger.warning(
-                "無法重新取得玩家面板，將使用既有訊息參照重試：message_id=%s",
+                "無法建立玩家面板的直接編輯參照：message_id=%s",
                 message.id,
                 exc_info=True,
             )
 
-    for attempt in range(2):
+    for attempt, delay in enumerate(PLAYER_PANEL_LOCK_RETRY_DELAYS):
+        if delay:
+            await asyncio.sleep(delay)
         try:
             await editable_message.edit(
                 content=None,
@@ -2253,11 +2253,10 @@ async def lock_player_panel_message(
             )
             return False
         except discord.HTTPException:
-            if attempt == 0:
-                await asyncio.sleep(0.5)
+            if attempt + 1 < len(PLAYER_PANEL_LOCK_RETRY_DELAYS):
                 continue
             logger.warning(
-                "重試後仍無法鎖定玩家面板：message_id=%s",
+                "多次重試後仍無法鎖定玩家面板：message_id=%s",
                 editable_message.id,
                 exc_info=True,
             )
@@ -2278,8 +2277,11 @@ class PlayerPanelSession:
         self.owner_name = owner_name
         self.message = message
         self.timeout_task: asyncio.Task[None] | None = None
+        self.expired = False
 
     def touch(self) -> None:
+        if self.expired:
+            return
         task = self.timeout_task
         if task is not None and not task.done():
             task.cancel()
@@ -2296,13 +2298,21 @@ class PlayerPanelSession:
             return
 
         # 不論目前停在哪一頁，逾時後統一切換成鎖定畫面。
-        await lock_player_panel_message(
+        self.expired = True
+        locked = await lock_player_panel_message(
             self.message,
             owner_name=self.owner_name,
             replaced=False,
         )
-        if ACTIVE_PLAYER_PANELS.get(self.owner_id) is self:
+        if locked and ACTIVE_PLAYER_PANELS.get(self.owner_id) is self:
             clear_player_panel_session(self, cancel_task=False)
+        elif not locked:
+            logger.warning(
+                "玩家面板已逾時但尚未完成畫面鎖定；"
+                "下次碰觸時會再次自我修復：user_id=%s message_id=%s",
+                self.owner_id,
+                self.message.id,
+            )
 
 
 ACTIVE_PLAYER_PANELS: dict[int, PlayerPanelSession] = {}
@@ -2351,7 +2361,7 @@ def current_player_panel(owner_id: int) -> PlayerPanelSession | None:
 
 
 async def lock_replaced_player_panel(
-    message: discord.Message,
+    message: discord.Message | discord.PartialMessage,
     *,
     owner_name: str,
 ) -> bool:
@@ -2365,7 +2375,7 @@ async def lock_replaced_player_panel(
 
 async def fetch_saved_player_panel(
     user_id: int,
-) -> discord.Message | None:
+) -> discord.Message | discord.PartialMessage | None:
     record = ACADEMY_DB.get_player_panel(user_id)
     if record is None:
         return None
@@ -2381,8 +2391,17 @@ async def fetch_saved_player_panel(
     if channel is None:
         try:
             channel = await client.fetch_channel(channel_id)
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        except discord.NotFound:
             ACADEMY_DB.delete_player_panel(user_id)
+            return None
+        except (discord.Forbidden, discord.HTTPException):
+            logger.warning(
+                "暫時無法取得玩家面板頻道，保留紀錄供稍後重試："
+                "user_id=%s channel_id=%s",
+                user_id,
+                channel_id,
+                exc_info=True,
+            )
             return None
 
     if not isinstance(
@@ -2396,10 +2415,24 @@ async def fetch_saved_player_panel(
         ACADEMY_DB.delete_player_panel(user_id)
         return None
 
+    # 直接建立可編輯參照，避免為了關閉舊面板而要求「讀取訊息歷史」。
+    get_partial_message = getattr(channel, "get_partial_message", None)
+    if callable(get_partial_message):
+        return get_partial_message(message_id)
+
     try:
         return await channel.fetch_message(message_id)
-    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+    except discord.NotFound:
         ACADEMY_DB.delete_player_panel(user_id)
+        return None
+    except (discord.Forbidden, discord.HTTPException):
+        logger.warning(
+            "暫時無法取得玩家面板訊息，保留紀錄供稍後重試："
+            "user_id=%s message_id=%s",
+            user_id,
+            message_id,
+            exc_info=True,
+        )
         return None
 
 
@@ -3082,30 +3115,56 @@ class MonkClient(discord.Client):
                 if channel is None:
                     try:
                         channel = await self.fetch_channel(channel_id)
-                    except (
-                        discord.NotFound,
-                        discord.Forbidden,
-                        discord.HTTPException,
-                    ):
+                    except discord.NotFound:
                         ACADEMY_DB.delete_player_panel(owner_id)
                         continue
+                    except (discord.Forbidden, discord.HTTPException):
+                        logger.warning(
+                            "啟動時暫時無法取得舊面板頻道，"
+                            "保留紀錄供下次重試：user_id=%s channel_id=%s",
+                            owner_id,
+                            channel_id,
+                            exc_info=True,
+                        )
+                        continue
 
-                try:
-                    message = await channel.fetch_message(message_id)
-                except (
-                    discord.NotFound,
-                    discord.Forbidden,
-                    discord.HTTPException,
-                ):
-                    ACADEMY_DB.delete_player_panel(owner_id)
-                    continue
+                get_partial_message = getattr(
+                    channel,
+                    "get_partial_message",
+                    None,
+                )
+                if callable(get_partial_message):
+                    message = get_partial_message(message_id)
+                else:
+                    try:
+                        message = await channel.fetch_message(message_id)
+                    except discord.NotFound:
+                        ACADEMY_DB.delete_player_panel(owner_id)
+                        continue
+                    except (discord.Forbidden, discord.HTTPException):
+                        logger.warning(
+                            "啟動時暫時無法取得舊面板訊息，"
+                            "保留紀錄供下次重試："
+                            "user_id=%s message_id=%s",
+                            owner_id,
+                            message_id,
+                            exc_info=True,
+                        )
+                        continue
 
-                await lock_player_panel_message(
+                locked = await lock_player_panel_message(
                     message,
                     owner_name="",
                     replaced=False,
                     restarted=True,
                 )
+                if not locked:
+                    logger.warning(
+                        "啟動時未能鎖定舊面板，保留紀錄供下次重試："
+                        "user_id=%s message_id=%s",
+                        owner_id,
+                        message_id,
+                    )
 
 
 client = MonkClient()
@@ -3687,7 +3746,32 @@ class UserOwnedView(discord.ui.View):
             return False
 
         session = current_player_panel(self.owner_id)
-        if session is None or session.message.id != message.id:
+        session_message_id = (
+            None if session is None else int(session.message.id)
+        )
+        if (
+            session is None
+            or session_message_id != int(message.id)
+            or session.expired
+        ):
+            # 工作階段已逾時、遺失或與資料庫不同時，不只拒絕操作，
+            # 也再次直接編輯訊息，避免畫面仍殘留看似可用的按鈕。
+            locked = await lock_player_panel_message(
+                message,
+                owner_name=interaction.user.display_name,
+                replaced=(
+                    session is not None
+                    and session_message_id != int(message.id)
+                ),
+                restarted=session is None,
+            )
+            if (
+                locked
+                and session is not None
+                and session_message_id == int(message.id)
+                and ACTIVE_PLAYER_PANELS.get(self.owner_id) is session
+            ):
+                clear_player_panel_session(session)
             await interaction.response.send_message(
                 "這張學生資料的操作入口已關閉。"
                 "請重新輸入 `/學生資料` 或 `/城下町`。",

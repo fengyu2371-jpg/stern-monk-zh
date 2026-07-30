@@ -991,12 +991,18 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
         self.assertIn("舊面板已鎖定", locked["embed"].title)
         self.assertIn("已開啟新的操作面板", locked["embed"].description)
 
-    async def test_panel_lock_refetches_message_with_bot_credentials(self) -> None:
+    async def test_panel_lock_uses_direct_bot_edit_without_history_fetch(self) -> None:
         stale_interaction_reference = FakeMessage(message_id=135)
         bot_editable_message = FakeMessage(message_id=135)
-        fetch_message = mock.AsyncMock(return_value=bot_editable_message)
+        get_partial_message = mock.Mock(return_value=bot_editable_message)
+        fetch_message = mock.AsyncMock(
+            side_effect=AssertionError(
+                "鎖定面板不應依賴讀取訊息歷史權限"
+            )
+        )
         stale_interaction_reference.channel = SimpleNamespace(
             id=123456789,
+            get_partial_message=get_partial_message,
             fetch_message=fetch_message,
         )
 
@@ -1007,10 +1013,116 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(locked)
-        fetch_message.assert_awaited_once_with(135)
+        get_partial_message.assert_called_once_with(135)
+        fetch_message.assert_not_awaited()
         self.assertEqual(stale_interaction_reference.edits, [])
         self.assertEqual(len(bot_editable_message.edits), 1)
         self.assertIsNone(bot_editable_message.edits[0]["view"])
+
+    async def test_saved_panel_builds_partial_message_without_history_fetch(
+        self,
+    ) -> None:
+        partial_message = FakeMessage(message_id=138)
+        channel = mock.MagicMock(spec=main.discord.TextChannel)
+        channel.get_partial_message.return_value = partial_message
+        channel.fetch_message = mock.AsyncMock(
+            side_effect=AssertionError(
+                "取得舊面板不應依賴讀取訊息歷史權限"
+            )
+        )
+
+        with (
+            mock.patch.object(
+                main.ACADEMY_DB,
+                "get_player_panel",
+                return_value={
+                    "channel_id": "123456789",
+                    "message_id": "138",
+                },
+            ),
+            mock.patch.object(
+                main.client,
+                "get_channel",
+                return_value=channel,
+            ),
+        ):
+            result = await main.fetch_saved_player_panel(self.user_id)
+
+        self.assertIs(result, partial_message)
+        channel.get_partial_message.assert_called_once_with(138)
+        channel.fetch_message.assert_not_awaited()
+
+    async def test_failed_timeout_lock_self_repairs_on_next_touch(self) -> None:
+        message = FakeMessage(message_id=136)
+        session = main.PlayerPanelSession(
+            owner_id=self.user_id,
+            owner_name="測試玩家",
+            message=message,
+        )
+        main.ACTIVE_PLAYER_PANELS[self.user_id] = session
+        try:
+            with (
+                mock.patch.object(
+                    main.asyncio,
+                    "sleep",
+                    new=mock.AsyncMock(),
+                ),
+                mock.patch.object(
+                    main,
+                    "lock_player_panel_message",
+                    new=mock.AsyncMock(return_value=False),
+                ),
+            ):
+                await session._expire()
+
+            self.assertTrue(session.expired)
+            self.assertIs(main.current_player_panel(self.user_id), session)
+
+            interaction = FakeInteraction(
+                user_id=self.user_id,
+                message=message,
+            )
+            view = main.TownLifeHubView(self.user_id)
+            with mock.patch.object(
+                main.ACADEMY_DB,
+                "get_player_panel",
+                return_value={"message_id": "136"},
+            ):
+                accepted = await view.interaction_check(interaction)
+
+            self.assertFalse(accepted)
+            self.assertIsNone(main.current_player_panel(self.user_id))
+            self.assertEqual(len(message.edits), 1)
+            self.assertIsNone(message.edits[0]["view"])
+            self.assertIn(
+                "操作畫面已鎖定",
+                message.edits[0]["embed"].title,
+            )
+        finally:
+            current = main.current_player_panel(self.user_id)
+            if current is not None:
+                main.clear_player_panel_session(current)
+
+    async def test_missing_session_visibly_locks_matching_saved_panel(self) -> None:
+        message = FakeMessage(message_id=137)
+        interaction = FakeInteraction(
+            user_id=self.user_id,
+            message=message,
+        )
+        view = main.TownLifeHubView(self.user_id)
+        main.ACTIVE_PLAYER_PANELS.pop(self.user_id, None)
+
+        with mock.patch.object(
+            main.ACADEMY_DB,
+            "get_player_panel",
+            return_value={"message_id": "137"},
+        ):
+            accepted = await view.interaction_check(interaction)
+
+        self.assertFalse(accepted)
+        self.assertEqual(len(message.edits), 1)
+        self.assertIsNone(message.edits[0]["view"])
+        self.assertIn("舊面板已鎖定", message.edits[0]["embed"].title)
 
     async def test_stale_panel_self_locks_when_player_touches_it(self) -> None:
         stale_message = FakeMessage(message_id=246)
