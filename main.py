@@ -2095,7 +2095,7 @@ class SafeModal(discord.ui.Modal):
 
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
-BUILD_VERSION = "2026-07-31-pixel-action-gems-v8"
+BUILD_VERSION = "2026-07-31-panel-lock-hardening-v9"
 
 
 def locked_operation_embed(
@@ -2199,9 +2199,28 @@ async def lock_player_panel_message(
     restarted: bool = False,
 ) -> bool:
     """Lock a panel through a bot-editable Message, retrying once."""
+    # InteractionMessage.edit() 依賴原斜線指令的 webhook 權杖。即使畫面仍在，
+    # 權杖過期或 Discord 未保留該互動時也可能無法更新。鎖定前先透過頻道
+    # 重新取得一般 Message，讓編輯改走 Bot 權杖並保持可長期運作。
+    editable_message = message
+    channel = getattr(message, "channel", None)
+    fetch_message = getattr(channel, "fetch_message", None)
+    if callable(fetch_message):
+        try:
+            editable_message = await fetch_message(int(message.id))
+        except discord.NotFound:
+            logger.info("待鎖定的玩家面板已不存在：message_id=%s", message.id)
+            return False
+        except (discord.Forbidden, discord.HTTPException):
+            logger.warning(
+                "無法重新取得玩家面板，將使用既有訊息參照重試：message_id=%s",
+                message.id,
+                exc_info=True,
+            )
+
     for attempt in range(2):
         try:
-            await message.edit(
+            await editable_message.edit(
                 content=None,
                 embed=locked_operation_embed(
                     owner_name=owner_name,
@@ -2213,7 +2232,7 @@ async def lock_player_panel_message(
             )
             logger.info(
                 "玩家面板已鎖定：message_id=%s reason=%s",
-                message.id,
+                editable_message.id,
                 (
                     "restart"
                     if restarted
@@ -2222,12 +2241,15 @@ async def lock_player_panel_message(
             )
             return True
         except discord.NotFound:
-            logger.info("待鎖定的玩家面板已不存在：message_id=%s", message.id)
+            logger.info(
+                "待鎖定的玩家面板已不存在：message_id=%s",
+                editable_message.id,
+            )
             return False
         except discord.Forbidden:
             logger.warning(
                 "缺少權限，無法鎖定玩家面板：message_id=%s",
-                message.id,
+                editable_message.id,
             )
             return False
         except discord.HTTPException:
@@ -2236,7 +2258,7 @@ async def lock_player_panel_message(
                 continue
             logger.warning(
                 "重試後仍無法鎖定玩家面板：message_id=%s",
-                message.id,
+                editable_message.id,
                 exc_info=True,
             )
             return False
@@ -3649,6 +3671,14 @@ class UserOwnedView(discord.ui.View):
             or message is None
             or str(message.id) != str(record.get("message_id"))
         ):
+            # 正常開新面板時會主動清除舊元件；若先前因 Discord 短暫錯誤
+            # 留下了舊畫面，玩家再次碰觸時立即自我修復成鎖定狀態。
+            if message is not None:
+                await lock_player_panel_message(
+                    message,
+                    owner_name=interaction.user.display_name,
+                    replaced=record is not None,
+                )
             await interaction.response.send_message(
                 "這不是你目前的學生資料面板。"
                 "請重新輸入 `/學生資料` 或 `/城下町`。",

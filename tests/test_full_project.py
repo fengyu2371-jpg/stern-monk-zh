@@ -991,6 +991,51 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
         self.assertIn("舊面板已鎖定", locked["embed"].title)
         self.assertIn("已開啟新的操作面板", locked["embed"].description)
 
+    async def test_panel_lock_refetches_message_with_bot_credentials(self) -> None:
+        stale_interaction_reference = FakeMessage(message_id=135)
+        bot_editable_message = FakeMessage(message_id=135)
+        fetch_message = mock.AsyncMock(return_value=bot_editable_message)
+        stale_interaction_reference.channel = SimpleNamespace(
+            id=123456789,
+            fetch_message=fetch_message,
+        )
+
+        locked = await main.lock_player_panel_message(
+            stale_interaction_reference,
+            owner_name="測試玩家",
+            replaced=True,
+        )
+
+        self.assertTrue(locked)
+        fetch_message.assert_awaited_once_with(135)
+        self.assertEqual(stale_interaction_reference.edits, [])
+        self.assertEqual(len(bot_editable_message.edits), 1)
+        self.assertIsNone(bot_editable_message.edits[0]["view"])
+
+    async def test_stale_panel_self_locks_when_player_touches_it(self) -> None:
+        stale_message = FakeMessage(message_id=246)
+        interaction = FakeInteraction(
+            user_id=self.user_id,
+            message=stale_message,
+        )
+        view = main.PlayerPanelHomeView(self.user_id)
+
+        with mock.patch.object(
+            main.ACADEMY_DB,
+            "get_player_panel",
+            return_value={"message_id": "999"},
+        ):
+            accepted = await view.interaction_check(interaction)
+
+        self.assertFalse(accepted)
+        self.assertEqual(len(stale_message.edits), 1)
+        self.assertIsNone(stale_message.edits[0]["view"])
+        self.assertIn(
+            "舊面板已鎖定",
+            stale_message.edits[0]["embed"].title,
+        )
+        self.assertTrue(interaction.response.messages)
+
     async def test_new_panel_prefers_active_session_when_db_lookup_is_unavailable(
         self,
     ) -> None:
