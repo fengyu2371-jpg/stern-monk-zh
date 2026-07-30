@@ -1996,28 +1996,6 @@ ORACLE_USAGE_SCOPE = "oracle_week"
 OUTFIT_USAGE_SCOPE = "outfit_day"
 
 
-def configured_action_emoji(
-    environment_name: str,
-    fallback: str,
-) -> str | discord.PartialEmoji:
-    raw = os.environ.get(environment_name, "").strip()
-    if not raw:
-        return fallback
-    return discord.PartialEmoji.from_str(raw)
-
-
-# Discord 按鈕不能直接使用專案內 PNG。未設定自訂 emoji ID 時，
-# 先以手機也容易辨認的顏色圓點顯示；上傳 assets/town_life/action_icons
-# 後，可在 Railway 設定對應的 <:name:id> 取代為菱形寶石。
-ACTION_COUNT_EMOJIS: dict[int, str | discord.PartialEmoji] = {
-    1: configured_action_emoji("ACTION_EMOJI_1", "🟢"),
-    3: configured_action_emoji("ACTION_EMOJI_3", "🔵"),
-    5: configured_action_emoji("ACTION_EMOJI_5", "🟡"),
-    10: configured_action_emoji("ACTION_EMOJI_10", "🔴"),
-    100: configured_action_emoji("ACTION_EMOJI_100", "🟣"),
-}
-
-
 def monk_embed(
     title: str,
     description: str,
@@ -2096,7 +2074,7 @@ class SafeModal(discord.ui.Modal):
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
 PLAYER_PANEL_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
-BUILD_VERSION = "2026-07-31-emoji-only-fishing-actions-v14"
+BUILD_VERSION = "2026-07-31-native-command-receipt-v18"
 
 
 def locked_operation_embed(
@@ -6787,14 +6765,14 @@ def fishing_embed(
             else 6
         )
         action_legend = (
-            "\n\n**彩色表符操作**\n"
-            f"{ACTION_COUNT_EMOJIS[1]} **綠色**｜1 次｜"
+            "\n\n**次數與體力消耗**\n"
+            "**1 次**｜"
             f"消耗 {stamina_per_attempt} 體力\n"
-            f"{ACTION_COUNT_EMOJIS[5]} **黃色**｜5 次｜"
+            "**5 次**｜"
             f"完整執行消耗 {stamina_per_attempt * 5} 體力\n"
-            f"{ACTION_COUNT_EMOJIS[10]} **紅色**｜10 次｜"
+            "**10 次**｜"
             f"完整執行消耗 {stamina_per_attempt * 10} 體力\n"
-            f"{ACTION_COUNT_EMOJIS[100]} **紫色**｜100 體力預算｜"
+            "**100 體力預算**｜"
             f"最多 {100 // stamina_per_attempt} 次\n"
             "體力不足完整批次時，會依剩餘體力完成可執行的次數。"
         )
@@ -7936,7 +7914,6 @@ class FishingRouteView(UserOwnedView):
 
     @discord.ui.button(
         label="河岸釣魚",
-        emoji="🎣",
         style=discord.ButtonStyle.primary,
         row=0,
     )
@@ -7949,7 +7926,6 @@ class FishingRouteView(UserOwnedView):
 
     @discord.ui.button(
         label="野外採集",
-        emoji="🌿",
         style=discord.ButtonStyle.success,
         row=0,
     )
@@ -8069,7 +8045,7 @@ class FishingActionView(UserOwnedView):
         )
 
     @discord.ui.button(
-        emoji=ACTION_COUNT_EMOJIS[1],
+        label="1 次",
         style=discord.ButtonStyle.primary,
         row=0,
     )
@@ -8084,7 +8060,7 @@ class FishingActionView(UserOwnedView):
         )
 
     @discord.ui.button(
-        emoji=ACTION_COUNT_EMOJIS[5],
+        label="5 次",
         style=discord.ButtonStyle.primary,
         row=0,
     )
@@ -8099,7 +8075,7 @@ class FishingActionView(UserOwnedView):
         )
 
     @discord.ui.button(
-        emoji=ACTION_COUNT_EMOJIS[10],
+        label="10 次",
         style=discord.ButtonStyle.primary,
         row=0,
     )
@@ -8114,7 +8090,7 @@ class FishingActionView(UserOwnedView):
         )
 
     @discord.ui.button(
-        emoji=ACTION_COUNT_EMOJIS[100],
+        label="100 體",
         style=discord.ButtonStyle.primary,
         row=1,
     )
@@ -8131,7 +8107,6 @@ class FishingActionView(UserOwnedView):
 
     @discord.ui.button(
         label="返回選擇地點",
-        emoji="↩️",
         style=discord.ButtonStyle.secondary,
         row=2,
     )
@@ -8190,7 +8165,6 @@ class CrystalRouteView(UserOwnedView):
 
     @discord.ui.button(
         label="外圍×1",
-        emoji=ACTION_COUNT_EMOJIS[1],
         style=discord.ButtonStyle.primary,
         row=0,
     )
@@ -8203,7 +8177,6 @@ class CrystalRouteView(UserOwnedView):
 
     @discord.ui.button(
         label="外圍×3",
-        emoji=ACTION_COUNT_EMOJIS[3],
         style=discord.ButtonStyle.primary,
         row=0,
     )
@@ -8216,7 +8189,6 @@ class CrystalRouteView(UserOwnedView):
 
     @discord.ui.button(
         label="外圍×5",
-        emoji=ACTION_COUNT_EMOJIS[5],
         style=discord.ButtonStyle.primary,
         row=0,
     )
@@ -8229,7 +8201,6 @@ class CrystalRouteView(UserOwnedView):
 
     @discord.ui.button(
         label="外圍｜100體",
-        emoji=ACTION_COUNT_EMOJIS[100],
         style=discord.ButtonStyle.primary,
         row=0,
     )
@@ -8247,7 +8218,6 @@ class CrystalRouteView(UserOwnedView):
 
     @discord.ui.button(
         label="深層×1",
-        emoji=ACTION_COUNT_EMOJIS[1],
         style=discord.ButtonStyle.primary,
         row=1,
     )
@@ -8260,7 +8230,6 @@ class CrystalRouteView(UserOwnedView):
 
     @discord.ui.button(
         label="深層×3",
-        emoji=ACTION_COUNT_EMOJIS[3],
         style=discord.ButtonStyle.primary,
         row=1,
     )
@@ -8273,7 +8242,6 @@ class CrystalRouteView(UserOwnedView):
 
     @discord.ui.button(
         label="深層×5",
-        emoji=ACTION_COUNT_EMOJIS[5],
         style=discord.ButtonStyle.primary,
         row=1,
     )
@@ -8286,7 +8254,6 @@ class CrystalRouteView(UserOwnedView):
 
     @discord.ui.button(
         label="深層｜100體",
-        emoji=ACTION_COUNT_EMOJIS[100],
         style=discord.ButtonStyle.primary,
         row=1,
     )
@@ -8304,7 +8271,6 @@ class CrystalRouteView(UserOwnedView):
 
     @discord.ui.button(
         label="洞窟×1",
-        emoji=ACTION_COUNT_EMOJIS[1],
         style=discord.ButtonStyle.primary,
         row=2,
     )
@@ -8317,7 +8283,6 @@ class CrystalRouteView(UserOwnedView):
 
     @discord.ui.button(
         label="洞窟×3",
-        emoji=ACTION_COUNT_EMOJIS[3],
         style=discord.ButtonStyle.primary,
         row=2,
     )
@@ -8330,7 +8295,6 @@ class CrystalRouteView(UserOwnedView):
 
     @discord.ui.button(
         label="洞窟×5",
-        emoji=ACTION_COUNT_EMOJIS[5],
         style=discord.ButtonStyle.primary,
         row=2,
     )
@@ -8343,7 +8307,6 @@ class CrystalRouteView(UserOwnedView):
 
     @discord.ui.button(
         label="洞窟｜100體",
-        emoji=ACTION_COUNT_EMOJIS[100],
         style=discord.ButtonStyle.primary,
         row=2,
     )
@@ -9647,7 +9610,7 @@ async def open_player_panel_page(
     if not interaction.response.is_done():
         await interaction.response.defer(
             thinking=True,
-            ephemeral=True,
+            ephemeral=False,
         )
 
     try:
@@ -9712,6 +9675,12 @@ async def open_player_panel_page(
         owner_name=interaction.user.display_name,
         message=message,
     )
+    logger.info(
+        "玩家面板已建立：user_id=%s display_name=%s message_id=%s",
+        interaction.user.id,
+        interaction.user.display_name,
+        message.id,
+    )
 
     # 舊訊息保留為明確的鎖定提示並移除按鈕；若 Discord 回傳的是
     # 同一則訊息，絕不處理。新面板若建立失敗，也不會走到這裡誤鎖舊面板。
@@ -9726,7 +9695,7 @@ async def open_player_panel_page(
 
     try:
         await interaction.edit_original_response(
-            content="新的操作面板已建立。",
+            content="操作面板已建立於下方。",
             embed=None,
             attachments=[],
             view=None,
@@ -9749,7 +9718,7 @@ async def _open_student_data_panel(
     if not interaction.response.is_done():
         await interaction.response.defer(
             thinking=True,
-            ephemeral=True,
+            ephemeral=False,
         )
 
     profile = ACADEMY_DB.get_profile_bundle(
@@ -9796,7 +9765,7 @@ async def town_life_command(
     if not interaction.response.is_done():
         await interaction.response.defer(
             thinking=True,
-            ephemeral=True,
+            ephemeral=False,
         )
     await open_player_panel_page(
         interaction,

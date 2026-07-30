@@ -36,6 +36,7 @@ class FakeResponse:
         self.done = False
         self.messages: list[tuple[tuple[object, ...], dict[str, object]]] = []
         self.edits: list[dict[str, object]] = []
+        self.defers: list[dict[str, object]] = []
 
     def is_done(self) -> bool:
         return self.done
@@ -50,6 +51,7 @@ class FakeResponse:
 
     async def defer(self, **kwargs: object) -> None:
         self.done = True
+        self.defers.append(kwargs)
 
 
 class FakeFollowup:
@@ -58,6 +60,22 @@ class FakeFollowup:
 
     async def send(self, *args: object, **kwargs: object) -> None:
         self.messages.append((args, kwargs))
+
+
+class FakeChannel:
+    def __init__(
+        self,
+        *,
+        channel_id: int = 123456789,
+        next_message: object | None = None,
+    ) -> None:
+        self.id = int(channel_id)
+        self.next_message = next_message
+        self.sends: list[dict[str, object]] = []
+
+    async def send(self, **kwargs: object) -> object | None:
+        self.sends.append(kwargs)
+        return self.next_message
 
 
 class FakeInteraction:
@@ -77,6 +95,7 @@ class FakeInteraction:
         )
         self.message = message
         self.original_message = original_message
+        self.channel = FakeChannel(next_message=original_message)
         self.channel_id = 123456789
 
     async def edit_original_response(self, **kwargs: object) -> object | None:
@@ -239,6 +258,8 @@ class ProjectStaticTests(DatabaseCase):
             main.FarmRouteView(self.user_id),
             main.RanchView(self.user_id),
             main.FishingRouteView(self.user_id),
+            main.FishingActionView(self.user_id, "fish"),
+            main.FishingActionView(self.user_id, "forage"),
             main.CrystalRouteView(self.user_id),
             main.StoveView(self.user_id),
             main.InventoryMarketView(self.user_id),
@@ -250,24 +271,45 @@ class ProjectStaticTests(DatabaseCase):
             for child in view.children:
                 self.assertIsNotNone(child.callback)
 
-    def test_batch_action_buttons_are_available(self) -> None:
-        fishing_labels = {
+    def test_mobile_fishing_flow_splits_location_and_attempts(self) -> None:
+        location_labels = {
             str(getattr(child, "label", ""))
             for child in main.FishingRouteView(self.user_id).children
         }
-        self.assertTrue(
+        self.assertEqual(
+            location_labels,
             {
-                "釣魚×1",
-                "釣魚×5",
-                "釣魚×10",
-                "釣魚｜100體",
-                "採集×1",
-                "採集×5",
-                "採集×10",
-                "採集｜100體",
-            }.issubset(fishing_labels)
+                "河岸釣魚",
+                "野外採集",
+                "河岸工坊",
+                "背包與出售",
+                "返回生活職業",
+            },
         )
 
+        for action in ("fish", "forage"):
+            view = main.FishingActionView(self.user_id, action)
+            self.assertEqual(
+                {
+                    str(getattr(child, "label", "") or "")
+                    for child in view.children
+                },
+                {
+                    "1 次",
+                    "5 次",
+                    "10 次",
+                    "100 體",
+                    "返回選擇地點",
+                },
+            )
+            self.assertTrue(
+                all(
+                    getattr(child, "emoji", None) is None
+                    for child in view.children
+                )
+            )
+
+    def test_batch_action_buttons_are_available(self) -> None:
         mining_labels = {
             str(getattr(child, "label", ""))
             for child in main.CrystalRouteView(self.user_id).children
@@ -848,6 +890,39 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
         ):
             self.assertIsNone(view.timeout)
 
+    async def test_fishing_location_opens_compact_attempt_page(self) -> None:
+        interaction = FakeInteraction(user_id=self.user_id)
+        view = main.FishingRouteView(self.user_id)
+
+        await view._open_action(interaction, action="fish")
+
+        self.assertEqual(len(interaction.response.edits), 1)
+        edit = interaction.response.edits[0]
+        self.assertIn("河岸釣魚", edit["embed"].title)
+        self.assertIn("**1 次**｜", edit["embed"].description)
+        self.assertIn("**5 次**｜", edit["embed"].description)
+        self.assertIn("**10 次**｜", edit["embed"].description)
+        self.assertIn("**100 體力預算**｜", edit["embed"].description)
+        self.assertIsInstance(edit["view"], main.FishingActionView)
+        self.assertEqual(edit["view"].action, "fish")
+        self.assertEqual(len(edit["view"].children), 5)
+        for attachment in edit.get("attachments", []):
+            attachment.close()
+
+    async def test_fishing_result_stays_on_selected_location(self) -> None:
+        interaction = FakeInteraction(user_id=self.user_id)
+        view = main.FishingActionView(self.user_id, "forage")
+
+        await view._run_fishing_action(interaction, attempts=1)
+
+        self.assertEqual(len(interaction.response.edits), 1)
+        edit = interaction.response.edits[0]
+        self.assertIn("野外採集", edit["embed"].title)
+        self.assertIsInstance(edit["view"], main.FishingActionView)
+        self.assertEqual(edit["view"].action, "forage")
+        for attachment in edit.get("attachments", []):
+            attachment.close()
+
     def test_player_panel_contains_outfit_entry_and_return_route(self) -> None:
         home = main.PlayerPanelHomeView(self.user_id)
         self.assertTrue(
@@ -982,6 +1057,17 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertIs(returned, new_message)
+        self.assertEqual(
+            interaction.response.defers,
+            [{"thinking": True, "ephemeral": False}],
+        )
+        self.assertEqual(len(interaction.channel.sends), 1)
+        self.assertIn("embed", interaction.channel.sends[0])
+        self.assertIn("view", interaction.channel.sends[0])
+        self.assertEqual(
+            interaction.original_edits[0]["content"],
+            "操作面板已建立於下方。",
+        )
         save_panel.assert_called_once()
         activate_panel.assert_called_once()
         self.assertEqual(len(previous_message.edits), 1)
@@ -1191,6 +1277,18 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
                 )
 
             fetch_saved.assert_not_awaited()
+            self.assertEqual(len(interaction.channel.sends), 1)
+            sent_panel = interaction.channel.sends[0]
+            self.assertNotIn("content", sent_panel)
+            self.assertNotIn("allowed_mentions", sent_panel)
+            self.assertEqual(
+                interaction.response.defers,
+                [{"thinking": True, "ephemeral": False}],
+            )
+            self.assertEqual(
+                interaction.original_edits[-1]["content"],
+                "操作面板已建立於下方。",
+            )
             self.assertEqual(len(previous_message.edits), 1)
             self.assertIsNone(previous_message.edits[0]["view"])
             self.assertIn(
@@ -1203,7 +1301,7 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
     async def test_failed_new_panel_creation_does_not_lock_previous_panel(self) -> None:
         previous_message = FakeMessage(message_id=111)
         interaction = FakeInteraction(user_id=self.user_id)
-        interaction.edit_original_response = mock.AsyncMock(
+        interaction.channel.send = mock.AsyncMock(
             side_effect=RuntimeError("Discord render failed"),
         )
 
@@ -1232,6 +1330,58 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(previous_message.edits, [])
         save_panel.assert_not_called()
         activate_panel.assert_not_called()
+
+    async def test_missing_channel_access_returns_specific_panel_error(
+        self,
+    ) -> None:
+        previous_message = FakeMessage(message_id=112)
+        interaction = FakeInteraction(user_id=self.user_id)
+        forbidden = main.discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"),
+            {"code": 50001, "message": "Missing Access"},
+        )
+        interaction.channel.send = mock.AsyncMock(side_effect=forbidden)
+
+        with (
+            mock.patch.object(
+                main,
+                "fetch_saved_player_panel",
+                new=mock.AsyncMock(return_value=previous_message),
+            ),
+            mock.patch.object(
+                main.ACADEMY_DB,
+                "save_player_panel",
+            ) as save_panel,
+            mock.patch.object(
+                main,
+                "activate_player_panel",
+            ) as activate_panel,
+        ):
+            with self.assertRaises(main.PlayerPanelAccessError):
+                await main.open_player_panel_page(
+                    interaction,
+                    embed=main.monk_embed("新面板", "測試"),
+                    view=main.PlayerPanelHomeView(self.user_id),
+                )
+
+        self.assertEqual(previous_message.edits, [])
+        save_panel.assert_not_called()
+        activate_panel.assert_not_called()
+
+    async def test_panel_access_error_explains_required_permissions(self) -> None:
+        interaction = FakeInteraction(user_id=self.user_id)
+        wrapped_error = SimpleNamespace(
+            original=main.PlayerPanelAccessError("Missing Access")
+        )
+
+        await main.on_app_command_error(interaction, wrapped_error)
+
+        self.assertTrue(interaction.response.messages)
+        message = str(interaction.response.messages[0][0][0])
+        self.assertIn("沒有權限", message)
+        self.assertIn("傳送訊息", message)
+        self.assertIn("嵌入連結", message)
+        self.assertIn("附加檔案", message)
 
     async def test_expired_confession_modal_is_rejected_without_processing(self) -> None:
         message_id = 123456
