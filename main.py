@@ -2096,7 +2096,7 @@ class SafeModal(discord.ui.Modal):
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
 PLAYER_PANEL_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
-BUILD_VERSION = "2026-07-31-bot-message-panel-lock-v11"
+BUILD_VERSION = "2026-07-31-emoji-only-fishing-actions-v14"
 
 
 def locked_operation_embed(
@@ -3044,6 +3044,10 @@ class OutfitDirectionView(discord.ui.View):
 
 class WrongMonkChannel(app_commands.CheckFailure):
     pass
+
+
+class PlayerPanelAccessError(RuntimeError):
+    """The bot cannot create a normal, lockable message in this channel."""
 
 
 class MonkCommandTree(app_commands.CommandTree):
@@ -6748,20 +6752,63 @@ def ranch_embed(user_id: int, *, notice: str = "", item_key: str = "") -> discor
     return _town_life_embed_with_item_thumbnail(embed, item_key)
 
 
-def fishing_embed(user_id: int, *, notice: str = "", item_key: str = "") -> discord.Embed:
+def fishing_embed(
+    user_id: int,
+    *,
+    notice: str = "",
+    item_key: str = "",
+    selected_action: str = "",
+) -> discord.Embed:
     snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
     career = snapshot["careers"].get("fishing", {"level": 1, "exp": 0})
+    fishing_rod_level = int(snapshot["tools"].get("fishing_rod", 0))
+    action_details = {
+        "fish": (
+            "河岸釣魚",
+            "已選擇河岸釣魚。請在下方選擇執行次數或體力預算。",
+        ),
+        "forage": (
+            "野外採集",
+            "已選擇野外採集。請在下方選擇執行次數或體力預算。",
+        ),
+    }
+    action_title, action_prompt = action_details.get(
+        selected_action,
+        (
+            "選擇地點",
+            "請先在下方選擇要前往河岸釣魚，或到野外採集。",
+        ),
+    )
+    action_legend = ""
+    if selected_action in action_details:
+        stamina_per_attempt = (
+            max(5, 10 - fishing_rod_level)
+            if selected_action == "fish"
+            else 6
+        )
+        action_legend = (
+            "\n\n**彩色表符操作**\n"
+            f"{ACTION_COUNT_EMOJIS[1]} **綠色**｜1 次｜"
+            f"消耗 {stamina_per_attempt} 體力\n"
+            f"{ACTION_COUNT_EMOJIS[5]} **黃色**｜5 次｜"
+            f"完整執行消耗 {stamina_per_attempt * 5} 體力\n"
+            f"{ACTION_COUNT_EMOJIS[10]} **紅色**｜10 次｜"
+            f"完整執行消耗 {stamina_per_attempt * 10} 體力\n"
+            f"{ACTION_COUNT_EMOJIS[100]} **紫色**｜100 體力預算｜"
+            f"最多 {100 // stamina_per_attempt} 次\n"
+            "體力不足完整批次時，會依剩餘體力完成可執行的次數。"
+        )
     description = (
         f"**漁採師 Lv.{int(career['level'])}**｜經驗 {int(career['exp'])}｜"
-        f"釣具 Lv.{int(snapshot['tools'].get('fishing_rod', 0))}\n"
+        f"釣具 Lv.{fishing_rod_level}\n"
         f"**體力** {int(snapshot['player']['stamina'])}／{int(snapshot['player']['max_stamina'])}｜"
         f"**精神力** {int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}\n\n"
         "釣魚需要釣具；野外採集不需要工具。\n"
-        "可一次執行 1／5／10 次，或選擇最多消耗 100 體力。"
+        f"{action_prompt}{action_legend}"
     )
     if notice:
         description = f"**本次結果**｜{notice}\n\n{description}"
-    embed = monk_embed("漁採師｜河岸與野外", description, color=0x4F7F91)
+    embed = monk_embed(f"漁採師｜{action_title}", description, color=0x4F7F91)
     embed = _town_life_embed_with_image(embed, "fishing")
     return _town_life_embed_with_item_thumbnail(embed, item_key)
 
@@ -7872,18 +7919,121 @@ class FishingRouteView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
         super().__init__(owner_id, add_home_button=False)
 
-    async def _run_fishing_action(
+    async def _open_action(
         self,
         interaction: discord.Interaction,
         *,
         action: str,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=fishing_embed(
+                self.owner_id,
+                selected_action=action,
+            ),
+            attachments=town_life_route_attachments("fishing"),
+            view=FishingActionView(self.owner_id, action),
+        )
+
+    @discord.ui.button(
+        label="河岸釣魚",
+        emoji="🎣",
+        style=discord.ButtonStyle.primary,
+        row=0,
+    )
+    async def choose_fishing(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._open_action(interaction, action="fish")
+
+    @discord.ui.button(
+        label="野外採集",
+        emoji="🌿",
+        style=discord.ButtonStyle.success,
+        row=0,
+    )
+    async def choose_forage(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._open_action(interaction, action="forage")
+
+    @discord.ui.button(label="河岸工坊", style=discord.ButtonStyle.primary, row=1)
+    async def workshop(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=workshop_embed(self.owner_id, "fishing"),
+            attachments=town_life_item_attachments("fishing_rod"),
+            view=WorkshopView(self.owner_id, "fishing"),
+        )
+
+    @discord.ui.button(label="背包與出售", style=discord.ButtonStyle.secondary, row=2)
+    async def market(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer()
+        snapshot = TOWN_LIFE_DB.get_snapshot(self.owner_id)
+        category, selected_item_key = _inventory_initial_state(
+            self.owner_id,
+            snapshot=snapshot,
+        )
+        await edit_component_message(
+            interaction,
+            embed=inventory_market_embed(
+                self.owner_id,
+                selected_item_key=selected_item_key,
+                category=category,
+                snapshot=snapshot,
+            ),
+            attachments=_inventory_selected_attachments(selected_item_key),
+            view=InventoryMarketView(
+                self.owner_id,
+                selected_item_key=selected_item_key,
+                category=category,
+                snapshot=snapshot,
+            ),
+        )
+
+    @discord.ui.button(label="返回生活職業", style=discord.ButtonStyle.secondary, row=2)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=town_life_home_embed(self.owner_id),
+            attachments=[],
+            view=TownLifeHubView(self.owner_id),
+        )
+
+
+class FishingActionView(UserOwnedView):
+    VALID_ACTIONS = {"fish", "forage"}
+
+    def __init__(self, owner_id: int, action: str) -> None:
+        super().__init__(owner_id, add_home_button=False)
+        if action not in self.VALID_ACTIONS:
+            raise ValueError(f"Unknown fishing action: {action}")
+        self.action = action
+        style = (
+            discord.ButtonStyle.primary
+            if action == "fish"
+            else discord.ButtonStyle.success
+        )
+        for button in (
+            self.run_once,
+            self.run_five,
+            self.run_ten,
+            self.run_budget,
+        ):
+            button.style = style
+
+    async def _run_fishing_action(
+        self,
+        interaction: discord.Interaction,
+        *,
         attempts: int,
         stamina_budget: int | None = None,
     ) -> None:
         if not await _town_life_begin_action(self, interaction):
             return
         try:
-            if action == "fish":
+            if self.action == "fish":
                 result = TOWN_LIFE_DB.fish(
                     self.owner_id,
                     attempts,
@@ -7909,191 +8059,91 @@ class FishingRouteView(UserOwnedView):
                 self.owner_id,
                 notice=notice,
                 item_key=item_key,
+                selected_action=self.action,
             ),
             attachments=town_life_display_attachments(
                 route_key="fishing",
                 item_key=item_key,
             ),
+            view=FishingActionView(self.owner_id, self.action),
+        )
+
+    @discord.ui.button(
+        emoji=ACTION_COUNT_EMOJIS[1],
+        style=discord.ButtonStyle.primary,
+        row=0,
+    )
+    async def run_once(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._run_fishing_action(
+            interaction,
+            attempts=1,
+        )
+
+    @discord.ui.button(
+        emoji=ACTION_COUNT_EMOJIS[5],
+        style=discord.ButtonStyle.primary,
+        row=0,
+    )
+    async def run_five(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._run_fishing_action(
+            interaction,
+            attempts=5,
+        )
+
+    @discord.ui.button(
+        emoji=ACTION_COUNT_EMOJIS[10],
+        style=discord.ButtonStyle.primary,
+        row=0,
+    )
+    async def run_ten(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._run_fishing_action(
+            interaction,
+            attempts=10,
+        )
+
+    @discord.ui.button(
+        emoji=ACTION_COUNT_EMOJIS[100],
+        style=discord.ButtonStyle.primary,
+        row=1,
+    )
+    async def run_budget(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._run_fishing_action(
+            interaction,
+            attempts=100,
+            stamina_budget=100,
+        )
+
+    @discord.ui.button(
+        label="返回選擇地點",
+        emoji="↩️",
+        style=discord.ButtonStyle.secondary,
+        row=2,
+    )
+    async def choose_location(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=fishing_embed(self.owner_id),
+            attachments=town_life_route_attachments("fishing"),
             view=FishingRouteView(self.owner_id),
-        )
-
-    @discord.ui.button(
-        label="釣魚×1",
-        emoji=ACTION_COUNT_EMOJIS[1],
-        style=discord.ButtonStyle.primary,
-        row=0,
-    )
-    async def fish_once(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await self._run_fishing_action(
-            interaction,
-            action="fish",
-            attempts=1,
-        )
-
-    @discord.ui.button(
-        label="釣魚×5",
-        emoji=ACTION_COUNT_EMOJIS[5],
-        style=discord.ButtonStyle.primary,
-        row=0,
-    )
-    async def fish_five(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await self._run_fishing_action(
-            interaction,
-            action="fish",
-            attempts=5,
-        )
-
-    @discord.ui.button(
-        label="釣魚×10",
-        emoji=ACTION_COUNT_EMOJIS[10],
-        style=discord.ButtonStyle.primary,
-        row=0,
-    )
-    async def fish_ten(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await self._run_fishing_action(
-            interaction,
-            action="fish",
-            attempts=10,
-        )
-
-    @discord.ui.button(
-        label="釣魚｜100體",
-        emoji=ACTION_COUNT_EMOJIS[100],
-        style=discord.ButtonStyle.primary,
-        row=0,
-    )
-    async def fish_budget(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await self._run_fishing_action(
-            interaction,
-            action="fish",
-            attempts=100,
-            stamina_budget=100,
-        )
-
-    @discord.ui.button(
-        label="採集×1",
-        emoji=ACTION_COUNT_EMOJIS[1],
-        style=discord.ButtonStyle.success,
-        row=1,
-    )
-    async def forage_once(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await self._run_fishing_action(
-            interaction,
-            action="forage",
-            attempts=1,
-        )
-
-    @discord.ui.button(
-        label="採集×5",
-        emoji=ACTION_COUNT_EMOJIS[5],
-        style=discord.ButtonStyle.success,
-        row=1,
-    )
-    async def forage_five(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await self._run_fishing_action(
-            interaction,
-            action="forage",
-            attempts=5,
-        )
-
-    @discord.ui.button(
-        label="採集×10",
-        emoji=ACTION_COUNT_EMOJIS[10],
-        style=discord.ButtonStyle.success,
-        row=1,
-    )
-    async def forage_ten(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await self._run_fishing_action(
-            interaction,
-            action="forage",
-            attempts=10,
-        )
-
-    @discord.ui.button(
-        label="採集｜100體",
-        emoji=ACTION_COUNT_EMOJIS[100],
-        style=discord.ButtonStyle.success,
-        row=1,
-    )
-    async def forage_budget(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await self._run_fishing_action(
-            interaction,
-            action="forage",
-            attempts=100,
-            stamina_budget=100,
-        )
-
-    @discord.ui.button(label="河岸工坊", style=discord.ButtonStyle.primary, row=2)
-    async def workshop(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.edit_message(
-            embed=workshop_embed(self.owner_id, "fishing"),
-            attachments=town_life_item_attachments("fishing_rod"),
-            view=WorkshopView(self.owner_id, "fishing"),
-        )
-
-    @discord.ui.button(label="背包與出售", style=discord.ButtonStyle.secondary, row=3)
-    async def market(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.defer()
-        snapshot = TOWN_LIFE_DB.get_snapshot(self.owner_id)
-        category, selected_item_key = _inventory_initial_state(
-            self.owner_id,
-            snapshot=snapshot,
-        )
-        await edit_component_message(
-            interaction,
-            embed=inventory_market_embed(
-                self.owner_id,
-                selected_item_key=selected_item_key,
-                category=category,
-                snapshot=snapshot,
-            ),
-            attachments=_inventory_selected_attachments(selected_item_key),
-            view=InventoryMarketView(
-                self.owner_id,
-                selected_item_key=selected_item_key,
-                category=category,
-                snapshot=snapshot,
-            ),
-        )
-
-    @discord.ui.button(label="返回生活職業", style=discord.ButtonStyle.secondary, row=3)
-    async def back(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.edit_message(
-            embed=town_life_home_embed(self.owner_id),
-            attachments=[],
-            view=TownLifeHubView(self.owner_id),
         )
 
 
@@ -9632,11 +9682,24 @@ async def open_player_panel_page(
     channel = interaction.channel
     send_message = getattr(channel, "send", None)
     if not callable(send_message):
-        raise RuntimeError("目前頻道不支援建立玩家操作面板。")
-    message = await send_message(
-        embed=embed,
-        view=view,
-    )
+        raise PlayerPanelAccessError(
+            "目前頻道不支援建立玩家操作面板。"
+        )
+    try:
+        message = await send_message(
+            embed=embed,
+            view=view,
+        )
+    except discord.Forbidden as exc:
+        logger.warning(
+            "Discord 拒絕 Bot 在指定頻道建立玩家面板："
+            "user_id=%s channel_id=%s",
+            interaction.user.id,
+            interaction.channel_id,
+        )
+        raise PlayerPanelAccessError(
+            "Bot 缺少建立玩家面板所需的頻道權限。"
+        ) from exc
 
     # 先把新訊息登記為目前面板，避免舊面板清理流程誤傷新面板。
     ACADEMY_DB.save_player_panel(
@@ -9888,6 +9951,7 @@ async def on_app_command_error(
     interaction: discord.Interaction,
     error: app_commands.AppCommandError,
 ) -> None:
+    original_error = getattr(error, "original", error)
     if isinstance(error, WrongMonkChannel):
         message = (
             f"這裡不是修士 Bot 的指定頻道。請到 <#{SETTINGS.monk_channel_id}> 使用指令。"
@@ -9895,6 +9959,13 @@ async def on_app_command_error(
     elif isinstance(error, app_commands.CommandOnCooldown):
         seconds = max(1, int(error.retry_after))
         message = f"指令冷卻中，請在 **{seconds} 秒**後再問。資料整理也需要一點時間。"
+    elif isinstance(original_error, PlayerPanelAccessError):
+        message = (
+            "修士能收到指令，但沒有權限在這個頻道建立可鎖定面板。\n\n"
+            "請到「編輯頻道 → 權限」，對修士 Bot 或其身分組開啟："
+            "「查看頻道」、「傳送訊息」、「嵌入連結」與「附加檔案」。"
+            "若在討論串內使用，另需開啟「在討論串中傳送訊息」。"
+        )
     else:
         logger.exception("斜線指令執行失敗：%s", error)
         message = "系統發生錯誤，這次不是你的操作問題。請通知管理員查看 Railway 紀錄。"
