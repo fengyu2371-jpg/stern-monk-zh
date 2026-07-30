@@ -3194,6 +3194,7 @@ DISTRICT_OVERVIEW_KEY = "城下町總覽"
 DISTRICT_ASSET_ROOT = Path(__file__).resolve().parent / "assets" / "districts"
 TOWN_LIFE_ASSET_ROOT = Path(__file__).resolve().parent / "assets" / "town_life"
 TOWN_LIFE_ROUTE_IMAGES: dict[str, str] = {
+    "home": "farm.webp",
     "farming": "farm.webp",
     "ranch": "ranch.webp",
     "fishing": "fishing.webp",
@@ -6345,45 +6346,26 @@ class DistrictBrowserView(UserOwnedView):
             view=TownHubView(self.owner_id),
         )
 
-def _town_life_tool_text(snapshot: dict[str, Any]) -> str:
-    tools = snapshot["tools"]
-    return "｜".join(
-        f"{tool_name(key)} Lv.{int(tools.get(key, 0))}"
-        for key in ("farm_tools", "fishing_rod", "pickaxe")
-    )
-
-
-def _town_life_career_text(snapshot: dict[str, Any]) -> str:
-    careers = snapshot["careers"]
-    return "\n".join(
-        f"**{info['name']} Lv.{int(careers.get(key, {}).get('level', 1))}**"
-        f"｜經驗 {int(careers.get(key, {}).get('exp', 0))}"
-        for key, info in CAREER_CONFIG.items()
-    )
-
-
 def town_life_home_embed(
     user_id: int,
     *,
     notice: str = "",
 ) -> discord.Embed:
+    """Render the compact, scene-first town-life landing panel."""
     snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
     player = snapshot["player"]
-    inventory_total = sum(int(value) for value in snapshot["inventory"].values())
-    unclaimed_mail = sum(
-        1 for mail in snapshot["mailbox"] if not str(mail["claimed_at"])
+    careers = snapshot["careers"]
+    career_summary = "｜".join(
+        f"**{info['name']} Lv.{int(careers.get(key, {}).get('level', 1))}**"
+        for key, info in CAREER_CONFIG.items()
     )
     description = (
-        "城下町的生活職業以生產、採集與工具成長為核心。"
-        "三條路線可以同時發展，不需要永久鎖定職業。\n\n"
-        f"**麻瓜幣**：{int(player['coins'])}\n"
-        f"**體力**：{int(player['stamina'])}／{int(player['max_stamina'])}"
-        "（每分鐘恢復 1 點；每天凌晨 00:00 重置）\n"
-        f"**精神力**：{int(player['spirit'])}／{int(player['max_spirit'])}"
-        "（透過料理或每日休息恢復）\n"
-        f"**物資總數**：{inventory_total}\n"
-        f"**信箱**：{'有 ' + str(unclaimed_mail) + ' 封待領' if unclaimed_mail else '沒有待領附件'}\n"
-        f"**工具**：{_town_life_tool_text(snapshot)}"
+        "石板路一路通往農田、河岸與魔晶礦坑。"
+        "三條生活職業可以同時發展，今天想先去哪裡？\n\n"
+        f"**麻瓜幣**　{int(player['coins'])}\n"
+        f"**體力**　{int(player['stamina'])}／{int(player['max_stamina'])}\n"
+        f"**精神力**　{int(player['spirit'])}／{int(player['max_spirit'])}\n\n"
+        f"{career_summary}"
     )
     if notice:
         description = f"**本次結果**\n{notice}\n\n{description}"
@@ -6392,21 +6374,11 @@ def town_life_home_embed(
         description,
         color=0x6B8E5E,
     )
-    embed.add_field(
-        name="三條職業路線",
-        value=_town_life_career_text(snapshot),
-        inline=False,
-    )
-    embed.add_field(
-        name="起步方式",
-        value=(
-            "初始有 600 麻瓜幣。Lv.1 基礎工具只需要麻瓜幣；"
-            "後續升級要帶採礦與採集素材到各區工坊。"
-            "沒有工具時仍可前往河岸採集，慢慢累積資金。"
-        ),
-        inline=False,
-    )
-    return embed
+    return _town_life_embed_with_image(embed, "home")
+
+
+def town_life_home_attachments() -> list[discord.File]:
+    return town_life_route_attachments("home")
 
 
 def tool_shop_embed(user_id: int, *, notice: str = "") -> discord.Embed:
@@ -7298,7 +7270,7 @@ class TownLifeHubView(UserOwnedView):
         )
         await interaction.response.edit_message(
             embed=town_life_home_embed(self.owner_id, notice=notice),
-            attachments=[],
+            attachments=town_life_home_attachments(),
             view=TownLifeHubView(self.owner_id),
         )
 
@@ -7411,7 +7383,7 @@ class MailboxView(UserOwnedView):
     ) -> None:
         await interaction.response.edit_message(
             embed=town_life_home_embed(self.owner_id),
-            attachments=[],
+            attachments=town_life_home_attachments(),
             view=TownLifeHubView(self.owner_id),
         )
 
@@ -7443,7 +7415,7 @@ class ToolShopView(UserOwnedView):
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.edit_message(
             embed=town_life_home_embed(self.owner_id),
-            attachments=[],
+            attachments=town_life_home_attachments(),
             view=TownLifeHubView(self.owner_id),
         )
 
@@ -7714,7 +7686,7 @@ class FarmRouteView(UserOwnedView):
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.edit_message(
             embed=town_life_home_embed(self.owner_id),
-            attachments=[],
+            attachments=town_life_home_attachments(),
             view=TownLifeHubView(self.owner_id),
         )
 
@@ -7888,7 +7860,7 @@ class RanchView(UserOwnedView):
     async def home(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.edit_message(
             embed=town_life_home_embed(self.owner_id),
-            attachments=[],
+            attachments=town_life_home_attachments(),
             view=TownLifeHubView(self.owner_id),
         )
 
@@ -7973,7 +7945,7 @@ class FishingRouteView(UserOwnedView):
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.edit_message(
             embed=town_life_home_embed(self.owner_id),
-            attachments=[],
+            attachments=town_life_home_attachments(),
             view=TownLifeHubView(self.owner_id),
         )
 
@@ -8359,7 +8331,7 @@ class CrystalRouteView(UserOwnedView):
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.edit_message(
             embed=town_life_home_embed(self.owner_id),
-            attachments=[],
+            attachments=town_life_home_attachments(),
             view=TownLifeHubView(self.owner_id),
         )
 
@@ -8558,7 +8530,7 @@ class StoveView(UserOwnedView):
     ) -> None:
         await interaction.response.edit_message(
             embed=town_life_home_embed(self.owner_id),
-            attachments=[],
+            attachments=town_life_home_attachments(),
             view=TownLifeHubView(self.owner_id),
         )
 
@@ -8939,7 +8911,7 @@ class InventoryMarketView(UserOwnedView):
         await edit_component_message(
             interaction,
             embed=town_life_home_embed(self.owner_id),
-            attachments=[],
+            attachments=town_life_home_attachments(),
             view=TownLifeHubView(self.owner_id),
         )
 
@@ -9007,7 +8979,7 @@ class TownHubView(UserOwnedView):
     ) -> None:
         await interaction.response.edit_message(
             embed=town_life_home_embed(self.owner_id),
-            attachments=[],
+            attachments=town_life_home_attachments(),
             view=TownLifeHubView(self.owner_id),
         )
 
@@ -9605,12 +9577,13 @@ async def open_player_panel_page(
     *,
     embed: discord.Embed,
     view: discord.ui.View,
+    files: list[discord.File] | None = None,
 ) -> discord.Message:
-    """Open a new player panel, then visibly lock the previous panel."""
+    """Open one public panel and keep the command acknowledgement private."""
     if not interaction.response.is_done():
         await interaction.response.defer(
             thinking=True,
-            ephemeral=False,
+            ephemeral=True,
         )
 
     try:
@@ -9639,20 +9612,22 @@ async def open_player_panel_page(
                 previous_message.id,
             )
 
-    # 斜線指令的原始回覆是互動 Webhook 訊息，只能在互動權杖有效期間內
-    # 編輯；Bot 權限再高也不能長期改寫其內容。玩家面板必須改由 Bot 在
-    # 頻道中送出一般訊息，才能在 5 分鐘後、新面板建立時或重啟後可靠鎖定。
+    # 斜線指令只以私人延遲回覆完成 Discord 的互動確認；真正的玩家面板
+    # 由 Bot 在頻道中送出一般訊息，才能在逾時、開啟新面板或重啟後可靠鎖定。
     channel = interaction.channel
     send_message = getattr(channel, "send", None)
     if not callable(send_message):
         raise PlayerPanelAccessError(
             "目前頻道不支援建立玩家操作面板。"
         )
+    send_kwargs: dict[str, Any] = {
+        "embed": embed,
+        "view": view,
+    }
+    if files:
+        send_kwargs["files"] = files
     try:
-        message = await send_message(
-            embed=embed,
-            view=view,
-        )
+        message = await send_message(**send_kwargs)
     except discord.Forbidden as exc:
         logger.warning(
             "Discord 拒絕 Bot 在指定頻道建立玩家面板："
@@ -9693,16 +9668,13 @@ async def open_player_panel_page(
             owner_name=interaction.user.display_name,
         )
 
+    # Slash command acknowledgements are only transport state. Remove the
+    # private loading response so the channel contains exactly one real panel.
     try:
-        await interaction.edit_original_response(
-            content="操作面板已建立於下方。",
-            embed=None,
-            attachments=[],
-            view=None,
-        )
+        await interaction.delete_original_response()
     except discord.HTTPException:
         logger.warning(
-            "玩家面板已建立，但無法更新斜線指令的私人確認訊息："
+            "玩家面板已建立，但無法移除斜線指令的私人確認訊息："
             "user_id=%s message_id=%s",
             interaction.user.id,
             message.id,
@@ -9715,12 +9687,6 @@ async def open_player_panel_page(
 async def _open_student_data_panel(
     interaction: discord.Interaction,
 ) -> None:
-    if not interaction.response.is_done():
-        await interaction.response.defer(
-            thinking=True,
-            ephemeral=False,
-        )
-
     profile = ACADEMY_DB.get_profile_bundle(
         interaction.user.id
     )
@@ -9762,15 +9728,11 @@ async def student_data_command(
 async def town_life_command(
     interaction: discord.Interaction,
 ) -> None:
-    if not interaction.response.is_done():
-        await interaction.response.defer(
-            thinking=True,
-            ephemeral=False,
-        )
     await open_player_panel_page(
         interaction,
         embed=town_life_home_embed(interaction.user.id),
         view=TownLifeHubView(interaction.user.id),
+        files=town_life_home_attachments(),
     )
 
 
