@@ -269,7 +269,9 @@ class ProjectStaticTests(DatabaseCase):
         self.assertNotIn("信箱", description)
         self.assertNotIn("起步方式", description)
         self.assertEqual(len(embed.fields), 0)
-        self.assertTrue(str(embed.image.url).endswith("farm.webp"))
+        self.assertTrue(
+            str(embed.image.url).endswith("town_life_home.webp")
+        )
 
     def test_main_views_construct_and_callbacks_are_bound(self) -> None:
         views = [
@@ -1079,13 +1081,14 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
         self.assertIs(returned, new_message)
         self.assertEqual(
             interaction.response.defers,
-            [{"thinking": True, "ephemeral": True}],
+            [{"thinking": True}],
         )
-        self.assertEqual(len(interaction.channel.sends), 1)
-        self.assertIn("embed", interaction.channel.sends[0])
-        self.assertIn("view", interaction.channel.sends[0])
-        self.assertEqual(interaction.original_deletes, 1)
-        self.assertEqual(interaction.original_edits, [])
+        self.assertEqual(interaction.channel.sends, [])
+        self.assertEqual(interaction.original_deletes, 0)
+        self.assertEqual(len(interaction.original_edits), 1)
+        self.assertIn("embed", interaction.original_edits[0])
+        self.assertIn("view", interaction.original_edits[0])
+        self.assertNotIn("content", interaction.original_edits[0])
         save_panel.assert_called_once()
         activate_panel.assert_called_once()
         self.assertEqual(len(previous_message.edits), 1)
@@ -1295,16 +1298,16 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
                 )
 
             fetch_saved.assert_not_awaited()
-            self.assertEqual(len(interaction.channel.sends), 1)
-            sent_panel = interaction.channel.sends[0]
+            self.assertEqual(interaction.channel.sends, [])
+            self.assertEqual(len(interaction.original_edits), 1)
+            sent_panel = interaction.original_edits[0]
             self.assertNotIn("content", sent_panel)
             self.assertNotIn("allowed_mentions", sent_panel)
             self.assertEqual(
                 interaction.response.defers,
-                [{"thinking": True, "ephemeral": True}],
+                [{"thinking": True}],
             )
-            self.assertEqual(interaction.original_deletes, 1)
-            self.assertEqual(interaction.original_edits, [])
+            self.assertEqual(interaction.original_deletes, 0)
             self.assertEqual(len(previous_message.edits), 1)
             self.assertIsNone(previous_message.edits[0]["view"])
             self.assertIn(
@@ -1317,7 +1320,7 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
     async def test_failed_new_panel_creation_does_not_lock_previous_panel(self) -> None:
         previous_message = FakeMessage(message_id=111)
         interaction = FakeInteraction(user_id=self.user_id)
-        interaction.channel.send = mock.AsyncMock(
+        interaction.edit_original_response = mock.AsyncMock(
             side_effect=RuntimeError("Discord render failed"),
         )
 
@@ -1356,7 +1359,9 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(status=403, reason="Forbidden"),
             {"code": 50001, "message": "Missing Access"},
         )
-        interaction.channel.send = mock.AsyncMock(side_effect=forbidden)
+        interaction.edit_original_response = mock.AsyncMock(
+            side_effect=forbidden
+        )
 
         with (
             mock.patch.object(

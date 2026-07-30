@@ -2074,7 +2074,7 @@ class SafeModal(discord.ui.Modal):
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
 PLAYER_PANEL_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
-BUILD_VERSION = "2026-07-31-public-command-panel-v20"
+BUILD_VERSION = "2026-07-31-town-life-home-art-v21"
 
 
 def locked_operation_embed(
@@ -3194,7 +3194,7 @@ DISTRICT_OVERVIEW_KEY = "城下町總覽"
 DISTRICT_ASSET_ROOT = Path(__file__).resolve().parent / "assets" / "districts"
 TOWN_LIFE_ASSET_ROOT = Path(__file__).resolve().parent / "assets" / "town_life"
 TOWN_LIFE_ROUTE_IMAGES: dict[str, str] = {
-    "home": "farm.webp",
+    "home": "town_life_home.webp",
     "farming": "farm.webp",
     "ranch": "ranch.webp",
     "fishing": "fishing.webp",
