@@ -2074,7 +2074,7 @@ class SafeModal(discord.ui.Modal):
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
 PLAYER_PANEL_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
-BUILD_VERSION = "2026-07-31-native-command-receipt-v18"
+BUILD_VERSION = "2026-07-31-public-command-panel-v20"
 
 
 def locked_operation_embed(
@@ -2178,9 +2178,9 @@ async def lock_player_panel_message(
     restarted: bool = False,
 ) -> bool:
     """Lock a panel with the bot token, without message-history access."""
-    # v11 起玩家面板一律由頻道的 channel.send() 建立，因此訊息作者就是
-    # Bot 本身，可以長期使用 Bot 權杖編輯。get_partial_message() 不會先
-    # 讀取訊息，也不需要「讀取訊息歷史」權限。
+    # 公開的斜線指令原始回覆同樣是 Bot 自己的頻道訊息。先建立
+    # PartialMessage，後續便能使用 Bot 權杖長期編輯，不受互動權杖期限
+    # 影響。get_partial_message() 不會先讀取訊息，也不需要讀取訊息歷史。
     channel = getattr(message, "channel", None)
     get_partial_message = getattr(channel, "get_partial_message", None)
     editable_message = message
@@ -9579,11 +9579,11 @@ async def open_player_panel_page(
     view: discord.ui.View,
     files: list[discord.File] | None = None,
 ) -> discord.Message:
-    """Open one public panel and keep the command acknowledgement private."""
+    """Open one public panel as the slash command's original response."""
+    use_original_response = not interaction.response.is_done()
     if not interaction.response.is_done():
         await interaction.response.defer(
             thinking=True,
-            ephemeral=True,
         )
 
     try:
@@ -9612,25 +9612,30 @@ async def open_player_panel_page(
                 previous_message.id,
             )
 
-    # 斜線指令只以私人延遲回覆完成 Discord 的互動確認；真正的玩家面板
-    # 由 Bot 在頻道中送出一般訊息，才能在逾時、開啟新面板或重啟後可靠鎖定。
-    channel = interaction.channel
-    send_message = getattr(channel, "send", None)
-    if not callable(send_message):
-        raise PlayerPanelAccessError(
-            "目前頻道不支援建立玩家操作面板。"
-        )
+    # 直接完成公開的斜線指令原始回覆，Discord 便會保留
+    # 「某使用者 已使用 /指令」並把面板接在下方；不另發提示或頻道訊息。
     send_kwargs: dict[str, Any] = {
         "embed": embed,
         "view": view,
     }
     if files:
-        send_kwargs["files"] = files
+        if use_original_response:
+            send_kwargs["attachments"] = files
+        else:
+            send_kwargs["files"] = files
     try:
-        message = await send_message(**send_kwargs)
+        if use_original_response:
+            message = await interaction.edit_original_response(
+                **send_kwargs
+            )
+        else:
+            message = await interaction.followup.send(
+                **send_kwargs,
+                wait=True,
+            )
     except discord.Forbidden as exc:
         logger.warning(
-            "Discord 拒絕 Bot 在指定頻道建立玩家面板："
+            "Discord 拒絕 Bot 完成公開的玩家面板回覆："
             "user_id=%s channel_id=%s",
             interaction.user.id,
             interaction.channel_id,
@@ -9666,19 +9671,6 @@ async def open_player_panel_page(
         await lock_replaced_player_panel(
             previous_message,
             owner_name=interaction.user.display_name,
-        )
-
-    # Slash command acknowledgements are only transport state. Remove the
-    # private loading response so the channel contains exactly one real panel.
-    try:
-        await interaction.delete_original_response()
-    except discord.HTTPException:
-        logger.warning(
-            "玩家面板已建立，但無法移除斜線指令的私人確認訊息："
-            "user_id=%s message_id=%s",
-            interaction.user.id,
-            message.id,
-            exc_info=True,
         )
 
     return message
