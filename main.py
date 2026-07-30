@@ -1996,6 +1996,28 @@ ORACLE_USAGE_SCOPE = "oracle_week"
 OUTFIT_USAGE_SCOPE = "outfit_day"
 
 
+def configured_action_emoji(
+    environment_name: str,
+    fallback: str,
+) -> str | discord.PartialEmoji:
+    raw = os.environ.get(environment_name, "").strip()
+    if not raw:
+        return fallback
+    return discord.PartialEmoji.from_str(raw)
+
+
+# Discord 按鈕不能直接使用專案內 PNG。未設定自訂 emoji ID 時，
+# 先以手機也容易辨認的顏色圓點顯示；上傳 assets/town_life/action_icons
+# 後，可在 Railway 設定對應的 <:name:id> 取代為菱形寶石。
+ACTION_COUNT_EMOJIS: dict[int, str | discord.PartialEmoji] = {
+    1: configured_action_emoji("ACTION_EMOJI_1", "🟢"),
+    3: configured_action_emoji("ACTION_EMOJI_3", "🔵"),
+    5: configured_action_emoji("ACTION_EMOJI_5", "🟡"),
+    10: configured_action_emoji("ACTION_EMOJI_10", "🔴"),
+    100: configured_action_emoji("ACTION_EMOJI_100", "🟣"),
+}
+
+
 def monk_embed(
     title: str,
     description: str,
@@ -2073,16 +2095,25 @@ class SafeModal(discord.ui.Modal):
 
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
-BUILD_VERSION = "2026-07-30-panel-lock-v3"
+BUILD_VERSION = "2026-07-31-pixel-action-gems-v8"
 
 
 def locked_operation_embed(
     *,
     owner_name: str | None = None,
     replaced: bool = False,
+    restarted: bool = False,
 ) -> discord.Embed:
     display_name = owner_name or "這位學生"
-    if replaced:
+    if restarted:
+        title = "🔒 舊面板已鎖定"
+        description = (
+            "修士 Bot 已重新啟動，這則面板屬於上一個工作階段。\n\n"
+            "為避免操作到過期資料，原有按鈕與選單已關閉。\n"
+            "請重新輸入 `/學生資料` 或 `/城下町` 開啟新面板。"
+        )
+        footer = "重新部署或重新啟動後，舊面板不會繼續接受操作。"
+    elif replaced:
         title = "🔒 舊面板已鎖定"
         description = (
             f"**{display_name}** 已開啟新的操作面板。\n\n"
@@ -2160,6 +2191,59 @@ def personal_panel_embed(
     return embed
 
 
+async def lock_player_panel_message(
+    message: discord.Message,
+    *,
+    owner_name: str,
+    replaced: bool,
+    restarted: bool = False,
+) -> bool:
+    """Lock a panel through a bot-editable Message, retrying once."""
+    for attempt in range(2):
+        try:
+            await message.edit(
+                content=None,
+                embed=locked_operation_embed(
+                    owner_name=owner_name,
+                    replaced=replaced,
+                    restarted=restarted,
+                ),
+                attachments=[],
+                view=None,
+            )
+            logger.info(
+                "玩家面板已鎖定：message_id=%s reason=%s",
+                message.id,
+                (
+                    "restart"
+                    if restarted
+                    else ("replaced" if replaced else "timeout")
+                ),
+            )
+            return True
+        except discord.NotFound:
+            logger.info("待鎖定的玩家面板已不存在：message_id=%s", message.id)
+            return False
+        except discord.Forbidden:
+            logger.warning(
+                "缺少權限，無法鎖定玩家面板：message_id=%s",
+                message.id,
+            )
+            return False
+        except discord.HTTPException:
+            if attempt == 0:
+                await asyncio.sleep(0.5)
+                continue
+            logger.warning(
+                "重試後仍無法鎖定玩家面板：message_id=%s",
+                message.id,
+                exc_info=True,
+            )
+            return False
+
+    return False
+
+
 class PlayerPanelSession:
     def __init__(
         self,
@@ -2189,19 +2273,14 @@ class PlayerPanelSession:
         if current is not self:
             return
 
-        clear_player_panel_session(self, cancel_task=False)
-        try:
-            # 不論目前停在哪一頁，逾時後統一切換成鎖定畫面。
-            await self.message.edit(
-                content=None,
-                embed=locked_operation_embed(
-                    owner_name=self.owner_name,
-                ),
-                attachments=[],
-                view=None,
-            )
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            logger.exception("玩家修士面板逾時鎖定失敗。")
+        # 不論目前停在哪一頁，逾時後統一切換成鎖定畫面。
+        await lock_player_panel_message(
+            self.message,
+            owner_name=self.owner_name,
+            replaced=False,
+        )
+        if ACTIVE_PLAYER_PANELS.get(self.owner_id) is self:
+            clear_player_panel_session(self, cancel_task=False)
 
 
 ACTIVE_PLAYER_PANELS: dict[int, PlayerPanelSession] = {}
@@ -2254,45 +2333,12 @@ async def lock_replaced_player_panel(
     *,
     owner_name: str,
 ) -> bool:
-    """Replace an old panel with a visible lock screen.
-
-    A transient Discord HTTP failure is retried once. The newer panel remains
-    authoritative even when the old message was deleted or cannot be edited.
-    """
-    for attempt in range(2):
-        try:
-            await message.edit(
-                content=None,
-                embed=locked_operation_embed(
-                    owner_name=owner_name,
-                    replaced=True,
-                ),
-                attachments=[],
-                view=None,
-            )
-            logger.info("舊玩家面板已鎖定：message_id=%s", message.id)
-            return True
-        except discord.NotFound:
-            logger.info("舊玩家面板已不存在：message_id=%s", message.id)
-            return False
-        except discord.Forbidden:
-            logger.warning(
-                "缺少權限，無法鎖定舊玩家面板：message_id=%s",
-                message.id,
-            )
-            return False
-        except discord.HTTPException:
-            if attempt == 0:
-                await asyncio.sleep(0.5)
-                continue
-            logger.warning(
-                "重試後仍無法鎖定舊玩家面板：message_id=%s",
-                message.id,
-                exc_info=True,
-            )
-            return False
-
-    return False
+    """Replace an old panel with a visible lock screen."""
+    return await lock_player_panel_message(
+        message,
+        owner_name=owner_name,
+        replaced=True,
+    )
 
 
 async def fetch_saved_player_panel(
@@ -2667,6 +2713,16 @@ def outfit_embed(
     return embed
 
 
+def outfit_start_embed() -> discord.Embed:
+    return monk_embed(
+        "👔 今日穿搭推薦",
+        "先選擇穿搭方向，再輸入今天想加入的關鍵詞。\n\n"
+        "方向只是風格分類，不代表穿著者性別。"
+        "赤木修士不會假設你的身材、年齡、預算或真實身分。",
+        color=0x3BA55D,
+    )
+
+
 class OutfitKeywordModal(SafeModal, title="今日穿搭推薦｜關鍵詞"):
     keywords = discord.ui.TextInput(
         label="今日關鍵詞",
@@ -2681,7 +2737,7 @@ class OutfitKeywordModal(SafeModal, title="今日穿搭推薦｜關鍵詞"):
         user_id: int,
         direction_key: str,
         source_message: discord.Message | None,
-        flow_view: "OutfitDirectionView",
+        flow_view: discord.ui.View,
     ) -> None:
         super().__init__()
         self.user_id = int(user_id)
@@ -2707,6 +2763,25 @@ class OutfitKeywordModal(SafeModal, title="今日穿搭推薦｜關鍵詞"):
                 ephemeral=True,
             )
             return
+
+        if bool(getattr(self.flow_view, "player_panel_managed", False)):
+            message = self.source_message
+            if message is None:
+                self.flow_view.close_flow()
+                await interaction.response.send_message(
+                    "找不到這個修士面板，沒有扣除今日使用次數。"
+                    "請重新輸入 `/學生資料` 或 `/城下町`。",
+                    ephemeral=True,
+                )
+                return
+            session = await validate_modal_player_panel(
+                interaction,
+                owner_id=self.user_id,
+                source_message_id=message.id,
+            )
+            if session is None:
+                self.flow_view.close_flow()
+                return
 
         # 表單一送出就關閉本次流程，避免重複提交造成重複計次。
         self.flow_view.close_flow()
@@ -2759,7 +2834,18 @@ class OutfitKeywordModal(SafeModal, title="今日穿搭推薦｜關鍵詞"):
         message = self.source_message
         if message is not None:
             try:
-                await message.edit(embed=embed, view=None)
+                result_view: discord.ui.View | None = None
+                if bool(
+                    getattr(
+                        self.flow_view,
+                        "player_panel_managed",
+                        False,
+                    )
+                ):
+                    result_view = PlayerPanelOutfitResultView(
+                        self.user_id
+                    )
+                await message.edit(embed=embed, view=result_view)
                 await interaction.followup.send(
                     "今日穿搭推薦已整理完畢。",
                     ephemeral=True,
@@ -2821,7 +2907,12 @@ class OutfitDirectionSelect(discord.ui.Select):
         interaction: discord.Interaction,
     ) -> None:
         flow_view = self.view
-        if not isinstance(flow_view, OutfitDirectionView):
+        if (
+            not isinstance(flow_view, OutfitDirectionView)
+            and not bool(
+                getattr(flow_view, "player_panel_managed", False)
+            )
+        ):
             await interaction.response.send_message(
                 "這份穿搭選單狀態異常，請重新輸入 `/今日穿搭推薦`。",
                 ephemeral=True,
@@ -2843,6 +2934,7 @@ class OutfitDirectionView(discord.ui.View):
         self.owner_id = int(owner_id)
         self.message: discord.Message | None = None
         self.active = True
+        self.player_panel_managed = False
         self.add_item(OutfitDirectionSelect(owner_id))
 
     def close_flow(self) -> None:
@@ -2978,13 +3070,20 @@ class MonkClient(discord.Client):
 
                 try:
                     message = await channel.fetch_message(message_id)
-                    await message.edit(view=None)
                 except (
                     discord.NotFound,
                     discord.Forbidden,
                     discord.HTTPException,
                 ):
                     ACADEMY_DB.delete_player_panel(owner_id)
+                    continue
+
+                await lock_player_panel_message(
+                    message,
+                    owner_name="",
+                    replaced=False,
+                    restarted=True,
+                )
 
 
 client = MonkClient()
@@ -3566,6 +3665,12 @@ class UserOwnedView(discord.ui.View):
             )
             return False
 
+        # 斜線指令最初回傳的 InteractionMessage 依賴互動權杖；
+        # 玩家操作一段時間後，該權杖可能失效。元件互動會提供可由
+        # Bot 正常編輯的目前 Message，因此每次操作都更新工作階段參照，
+        # 確保停在主面板、背包或任何子頁時都能在 5 分鐘後鎖定。
+        session.message = message
+        session.owner_name = interaction.user.display_name
         session.touch()
         if self.auto_defer and not interaction.response.is_done():
             await interaction.response.defer()
@@ -7698,7 +7803,12 @@ class FishingRouteView(UserOwnedView):
             view=FishingRouteView(self.owner_id),
         )
 
-    @discord.ui.button(label="釣魚×1", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(
+        label="釣魚×1",
+        emoji=ACTION_COUNT_EMOJIS[1],
+        style=discord.ButtonStyle.primary,
+        row=0,
+    )
     async def fish_once(
         self,
         interaction: discord.Interaction,
@@ -7710,7 +7820,12 @@ class FishingRouteView(UserOwnedView):
             attempts=1,
         )
 
-    @discord.ui.button(label="釣魚×5", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(
+        label="釣魚×5",
+        emoji=ACTION_COUNT_EMOJIS[5],
+        style=discord.ButtonStyle.primary,
+        row=0,
+    )
     async def fish_five(
         self,
         interaction: discord.Interaction,
@@ -7722,7 +7837,12 @@ class FishingRouteView(UserOwnedView):
             attempts=5,
         )
 
-    @discord.ui.button(label="釣魚×10", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(
+        label="釣魚×10",
+        emoji=ACTION_COUNT_EMOJIS[10],
+        style=discord.ButtonStyle.primary,
+        row=0,
+    )
     async def fish_ten(
         self,
         interaction: discord.Interaction,
@@ -7734,7 +7854,12 @@ class FishingRouteView(UserOwnedView):
             attempts=10,
         )
 
-    @discord.ui.button(label="釣魚｜100體", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(
+        label="釣魚｜100體",
+        emoji=ACTION_COUNT_EMOJIS[100],
+        style=discord.ButtonStyle.primary,
+        row=0,
+    )
     async def fish_budget(
         self,
         interaction: discord.Interaction,
@@ -7747,7 +7872,12 @@ class FishingRouteView(UserOwnedView):
             stamina_budget=100,
         )
 
-    @discord.ui.button(label="採集×1", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(
+        label="採集×1",
+        emoji=ACTION_COUNT_EMOJIS[1],
+        style=discord.ButtonStyle.success,
+        row=1,
+    )
     async def forage_once(
         self,
         interaction: discord.Interaction,
@@ -7759,7 +7889,12 @@ class FishingRouteView(UserOwnedView):
             attempts=1,
         )
 
-    @discord.ui.button(label="採集×5", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(
+        label="採集×5",
+        emoji=ACTION_COUNT_EMOJIS[5],
+        style=discord.ButtonStyle.success,
+        row=1,
+    )
     async def forage_five(
         self,
         interaction: discord.Interaction,
@@ -7771,7 +7906,12 @@ class FishingRouteView(UserOwnedView):
             attempts=5,
         )
 
-    @discord.ui.button(label="採集×10", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(
+        label="採集×10",
+        emoji=ACTION_COUNT_EMOJIS[10],
+        style=discord.ButtonStyle.success,
+        row=1,
+    )
     async def forage_ten(
         self,
         interaction: discord.Interaction,
@@ -7783,7 +7923,12 @@ class FishingRouteView(UserOwnedView):
             attempts=10,
         )
 
-    @discord.ui.button(label="採集｜100體", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(
+        label="採集｜100體",
+        emoji=ACTION_COUNT_EMOJIS[100],
+        style=discord.ButtonStyle.success,
+        row=1,
+    )
     async def forage_budget(
         self,
         interaction: discord.Interaction,
@@ -7879,7 +8024,12 @@ class CrystalRouteView(UserOwnedView):
             view=CrystalRouteView(self.owner_id),
         )
 
-    @discord.ui.button(label="外圍×1", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(
+        label="外圍×1",
+        emoji=ACTION_COUNT_EMOJIS[1],
+        style=discord.ButtonStyle.primary,
+        row=0,
+    )
     async def outer_tunnel_once(
         self,
         interaction: discord.Interaction,
@@ -7887,7 +8037,12 @@ class CrystalRouteView(UserOwnedView):
     ) -> None:
         await self._mine_area(interaction, "outer_tunnel", 1)
 
-    @discord.ui.button(label="外圍×3", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(
+        label="外圍×3",
+        emoji=ACTION_COUNT_EMOJIS[3],
+        style=discord.ButtonStyle.primary,
+        row=0,
+    )
     async def outer_tunnel_three(
         self,
         interaction: discord.Interaction,
@@ -7895,7 +8050,12 @@ class CrystalRouteView(UserOwnedView):
     ) -> None:
         await self._mine_area(interaction, "outer_tunnel", 3)
 
-    @discord.ui.button(label="外圍×5", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(
+        label="外圍×5",
+        emoji=ACTION_COUNT_EMOJIS[5],
+        style=discord.ButtonStyle.primary,
+        row=0,
+    )
     async def outer_tunnel_five(
         self,
         interaction: discord.Interaction,
@@ -7903,7 +8063,12 @@ class CrystalRouteView(UserOwnedView):
     ) -> None:
         await self._mine_area(interaction, "outer_tunnel", 5)
 
-    @discord.ui.button(label="外圍｜100體", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(
+        label="外圍｜100體",
+        emoji=ACTION_COUNT_EMOJIS[100],
+        style=discord.ButtonStyle.primary,
+        row=0,
+    )
     async def outer_tunnel_budget(
         self,
         interaction: discord.Interaction,
@@ -7916,7 +8081,12 @@ class CrystalRouteView(UserOwnedView):
             stamina_budget=100,
         )
 
-    @discord.ui.button(label="深層×1", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(
+        label="深層×1",
+        emoji=ACTION_COUNT_EMOJIS[1],
+        style=discord.ButtonStyle.primary,
+        row=1,
+    )
     async def iron_depths_once(
         self,
         interaction: discord.Interaction,
@@ -7924,7 +8094,12 @@ class CrystalRouteView(UserOwnedView):
     ) -> None:
         await self._mine_area(interaction, "iron_depths", 1)
 
-    @discord.ui.button(label="深層×3", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(
+        label="深層×3",
+        emoji=ACTION_COUNT_EMOJIS[3],
+        style=discord.ButtonStyle.primary,
+        row=1,
+    )
     async def iron_depths_three(
         self,
         interaction: discord.Interaction,
@@ -7932,7 +8107,12 @@ class CrystalRouteView(UserOwnedView):
     ) -> None:
         await self._mine_area(interaction, "iron_depths", 3)
 
-    @discord.ui.button(label="深層×5", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(
+        label="深層×5",
+        emoji=ACTION_COUNT_EMOJIS[5],
+        style=discord.ButtonStyle.primary,
+        row=1,
+    )
     async def iron_depths_five(
         self,
         interaction: discord.Interaction,
@@ -7940,7 +8120,12 @@ class CrystalRouteView(UserOwnedView):
     ) -> None:
         await self._mine_area(interaction, "iron_depths", 5)
 
-    @discord.ui.button(label="深層｜100體", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(
+        label="深層｜100體",
+        emoji=ACTION_COUNT_EMOJIS[100],
+        style=discord.ButtonStyle.primary,
+        row=1,
+    )
     async def iron_depths_budget(
         self,
         interaction: discord.Interaction,
@@ -7953,7 +8138,12 @@ class CrystalRouteView(UserOwnedView):
             stamina_budget=100,
         )
 
-    @discord.ui.button(label="洞窟×1", style=discord.ButtonStyle.primary, row=2)
+    @discord.ui.button(
+        label="洞窟×1",
+        emoji=ACTION_COUNT_EMOJIS[1],
+        style=discord.ButtonStyle.primary,
+        row=2,
+    )
     async def crystal_cavern_once(
         self,
         interaction: discord.Interaction,
@@ -7961,7 +8151,12 @@ class CrystalRouteView(UserOwnedView):
     ) -> None:
         await self._mine_area(interaction, "crystal_cavern", 1)
 
-    @discord.ui.button(label="洞窟×3", style=discord.ButtonStyle.primary, row=2)
+    @discord.ui.button(
+        label="洞窟×3",
+        emoji=ACTION_COUNT_EMOJIS[3],
+        style=discord.ButtonStyle.primary,
+        row=2,
+    )
     async def crystal_cavern_three(
         self,
         interaction: discord.Interaction,
@@ -7969,7 +8164,12 @@ class CrystalRouteView(UserOwnedView):
     ) -> None:
         await self._mine_area(interaction, "crystal_cavern", 3)
 
-    @discord.ui.button(label="洞窟×5", style=discord.ButtonStyle.primary, row=2)
+    @discord.ui.button(
+        label="洞窟×5",
+        emoji=ACTION_COUNT_EMOJIS[5],
+        style=discord.ButtonStyle.primary,
+        row=2,
+    )
     async def crystal_cavern_five(
         self,
         interaction: discord.Interaction,
@@ -7977,7 +8177,12 @@ class CrystalRouteView(UserOwnedView):
     ) -> None:
         await self._mine_area(interaction, "crystal_cavern", 5)
 
-    @discord.ui.button(label="洞窟｜100體", style=discord.ButtonStyle.primary, row=2)
+    @discord.ui.button(
+        label="洞窟｜100體",
+        emoji=ACTION_COUNT_EMOJIS[100],
+        style=discord.ButtonStyle.primary,
+        row=2,
+    )
     async def crystal_cavern_budget(
         self,
         interaction: discord.Interaction,
@@ -9111,6 +9316,27 @@ class OracleHubView(UserOwnedView):
         )
 
 
+class PlayerPanelOutfitResultView(UserOwnedView):
+    """Keep the outfit result visible with a route back to the main panel."""
+
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(owner_id)
+
+
+class PlayerPanelOutfitView(UserOwnedView):
+    """Outfit selection hosted inside the canonical player panel session."""
+
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(owner_id)
+        self.active = True
+        self.player_panel_managed = True
+        self.add_item(OutfitDirectionSelect(owner_id))
+
+    def close_flow(self) -> None:
+        self.active = False
+        self.stop()
+
+
 class PlayerPanelHomeView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
         super().__init__(
@@ -9209,6 +9435,41 @@ class PlayerPanelHomeView(UserOwnedView):
                 user_id=self.owner_id,
                 source_message_id=message.id,
             )
+        )
+
+    @discord.ui.button(
+        label="今日穿搭",
+        style=discord.ButtonStyle.secondary,
+        emoji="👔",
+        row=1,
+    )
+    async def outfit(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        period_key = taipei_today().isoformat()
+        used = ACADEMY_DB.get_usage_count(
+            user_id=self.owner_id,
+            usage_scope=OUTFIT_USAGE_SCOPE,
+            period_key=period_key,
+        )
+        if used >= 1:
+            await interaction.response.send_message(
+                embed=monk_embed(
+                    "👔 今日穿搭推薦",
+                    "你今天已經使用過 1 次穿搭推薦。\n"
+                    "明天再來。衣櫃不會跑走，別急。",
+                    color=0x747F8D,
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.edit_message(
+            embed=outfit_start_embed(),
+            attachments=[],
+            view=PlayerPanelOutfitView(self.owner_id),
         )
 
 
@@ -9363,13 +9624,7 @@ async def outfit_command(
 
     view = OutfitDirectionView(interaction.user.id)
     await interaction.response.send_message(
-        embed=monk_embed(
-            "👔 今日穿搭推薦",
-            "先選擇穿搭方向，再輸入今天想加入的關鍵詞。\n\n"
-            "方向只是風格分類，不代表穿著者性別。"
-            "赤木修士不會假設你的身材、年齡、預算或真實身分。",
-            color=0x3BA55D,
-        ),
+        embed=outfit_start_embed(),
         view=view,
     )
     view.message = await interaction.original_response()

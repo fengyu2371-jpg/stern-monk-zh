@@ -55,6 +55,28 @@ assets/
 
 同一位玩家重新輸入 `/學生資料` 或 `/城下町` 時，Bot 會在新面板建立成功後，立刻把上一張面板切換成「舊面板已鎖定」並移除所有操作元件，只留下最新面板可操作。若新面板建立失敗，舊面板不會被誤鎖。
 
+修士主面板也提供「今日穿搭」按鈕，與 `/今日穿搭推薦` 共用每日一次限制。面板內完成推薦後可直接返回主面板；逾時或已被新面板取代的穿搭表單不會扣除使用次數。
+
+### 手機版生活操作顏色圖標
+
+釣魚、採集與採礦的批次按鈕會以顏色優先顯示操作量：
+
+- 綠色：1 次
+- 藍色：3 次
+- 黃色：5 次
+- 紅色：10 次
+- 紫色：最多消耗 100 體力
+
+未設定自訂 emoji 時會使用 Unicode 顏色圓點，按鈕文字仍保留實際次數，避免只靠顏色判讀。若要使用專案內的菱形寶石，請將 `assets/town_life/action_icons/` 的五張 PNG 上傳為 Discord 伺服器 emoji，再於 Railway 設定：
+
+```text
+ACTION_EMOJI_1=<:action_1_green:EMOJI_ID>
+ACTION_EMOJI_3=<:action_3_blue:EMOJI_ID>
+ACTION_EMOJI_5=<:action_5_yellow:EMOJI_ID>
+ACTION_EMOJI_10=<:action_10_red:EMOJI_ID>
+ACTION_EMOJI_100=<:action_100_purple:EMOJI_ID>
+```
+
 ## 三條職業路線
 
 三條路線不會永久綁定，玩家可以同時培養。

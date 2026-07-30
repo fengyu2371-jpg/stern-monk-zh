@@ -843,8 +843,34 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
             main.TownHubView(self.user_id),
             main.OracleHubView(self.user_id),
             main.PlayerPanelHomeView(self.user_id),
+            main.PlayerPanelOutfitView(self.user_id),
+            main.PlayerPanelOutfitResultView(self.user_id),
         ):
             self.assertIsNone(view.timeout)
+
+    def test_player_panel_contains_outfit_entry_and_return_route(self) -> None:
+        home = main.PlayerPanelHomeView(self.user_id)
+        self.assertTrue(
+            any(child.label == "今日穿搭" for child in home.children)
+        )
+
+        outfit = main.PlayerPanelOutfitView(self.user_id)
+        self.assertTrue(
+            any(
+                isinstance(child, main.OutfitDirectionSelect)
+                for child in outfit.children
+            )
+        )
+        self.assertTrue(
+            any(child.label == "返回主面板" for child in outfit.children)
+        )
+
+    def test_restart_lock_screen_explains_why_old_panel_closed(self) -> None:
+        embed = main.locked_operation_embed(restarted=True)
+        self.assertIn("舊面板已鎖定", embed.title)
+        self.assertIn("Bot 已重新啟動", embed.description)
+        self.assertIn("/學生資料", embed.description)
+        self.assertIn("/城下町", embed.description)
 
     async def test_player_panel_session_expiry_removes_all_components(self) -> None:
         message = FakeMessage()
@@ -869,6 +895,62 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
             self.assertIn("操作畫面已鎖定", message.edits[0]["embed"].title)
         finally:
             main.ACTIVE_PLAYER_PANELS.pop(self.user_id, None)
+
+    async def test_home_and_inventory_refresh_the_lockable_message_reference(
+        self,
+    ) -> None:
+        for view in (
+            main.PlayerPanelHomeView(self.user_id),
+            main.InventoryMarketView(self.user_id),
+        ):
+            with self.subTest(view=type(view).__name__):
+                stale_reference = FakeMessage(message_id=555)
+                current_message = FakeMessage(message_id=555)
+                session = main.PlayerPanelSession(
+                    owner_id=self.user_id,
+                    owner_name="舊名稱",
+                    message=stale_reference,
+                )
+                main.ACTIVE_PLAYER_PANELS[self.user_id] = session
+                interaction = FakeInteraction(
+                    user_id=self.user_id,
+                    message=current_message,
+                )
+
+                try:
+                    with mock.patch.object(
+                        main.ACADEMY_DB,
+                        "get_player_panel",
+                        return_value={"message_id": "555"},
+                    ):
+                        accepted = await view.interaction_check(interaction)
+
+                    self.assertTrue(accepted)
+                    self.assertIs(session.message, current_message)
+                    self.assertEqual(session.owner_name, "測試玩家")
+
+                    timer = session.timeout_task
+                    if timer is not None:
+                        timer.cancel()
+                        await asyncio.sleep(0)
+                    session.timeout_task = None
+
+                    with mock.patch.object(
+                        main.asyncio,
+                        "sleep",
+                        new=mock.AsyncMock(),
+                    ):
+                        await session._expire()
+
+                    self.assertEqual(stale_reference.edits, [])
+                    self.assertEqual(len(current_message.edits), 1)
+                    self.assertIsNone(current_message.edits[0]["view"])
+                    self.assertIn(
+                        "操作畫面已鎖定",
+                        current_message.edits[0]["embed"].title,
+                    )
+                finally:
+                    main.clear_player_panel_session(session)
 
     async def test_opening_new_panel_visibly_locks_previous_panel(self) -> None:
         previous_message = FakeMessage(message_id=111)
@@ -1046,6 +1128,86 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "沒有扣除今日使用次數",
             str(interaction.response.messages[0][0][0]),
+        )
+
+    async def test_expired_panel_outfit_modal_does_not_consume_usage(self) -> None:
+        flow_view = main.PlayerPanelOutfitView(self.user_id)
+        source_message = FakeMessage(message_id=777)
+        modal = main.OutfitKeywordModal(
+            user_id=self.user_id,
+            direction_key="neutral",
+            source_message=source_message,
+            flow_view=flow_view,
+        )
+        interaction = FakeInteraction(user_id=self.user_id)
+
+        with (
+            mock.patch.object(
+                main,
+                "validate_modal_player_panel",
+                new=mock.AsyncMock(return_value=None),
+            ),
+            mock.patch.object(
+                main.ACADEMY_DB,
+                "try_reserve_usage",
+                side_effect=AssertionError(
+                    "失效的面板穿搭表單不應扣除使用次數"
+                ),
+            ),
+        ):
+            await modal.on_submit(interaction)
+
+        self.assertFalse(flow_view.active)
+
+    async def test_panel_outfit_result_keeps_return_to_home_button(self) -> None:
+        flow_view = main.PlayerPanelOutfitView(self.user_id)
+        source_message = FakeMessage(message_id=778)
+        modal = main.OutfitKeywordModal(
+            user_id=self.user_id,
+            direction_key="neutral",
+            source_message=source_message,
+            flow_view=flow_view,
+        )
+        interaction = FakeInteraction(user_id=self.user_id)
+        direction = main.choose_outfit_direction("neutral")
+        recommendation = main.outfit_fallback(
+            direction=direction,
+            keywords="",
+        )
+
+        with (
+            mock.patch.object(
+                main,
+                "validate_modal_player_panel",
+                new=mock.AsyncMock(return_value=object()),
+            ),
+            mock.patch.object(
+                main.ACADEMY_DB,
+                "try_reserve_usage",
+                return_value=1,
+            ),
+            mock.patch.object(
+                main,
+                "generate_outfit_recommendation",
+                new=mock.AsyncMock(
+                    return_value=(recommendation, True)
+                ),
+            ),
+        ):
+            await modal.on_submit(interaction)
+
+        self.assertFalse(flow_view.active)
+        self.assertEqual(len(source_message.edits), 1)
+        result_view = source_message.edits[0]["view"]
+        self.assertIsInstance(
+            result_view,
+            main.PlayerPanelOutfitResultView,
+        )
+        self.assertTrue(
+            any(
+                child.label == "返回主面板"
+                for child in result_view.children
+            )
         )
 
     async def test_ai_confession_keeps_player_panel_unchanged(self) -> None:

@@ -1,0 +1,47 @@
+{
+  "purpose": "Discord mobile action-count custom emoji",
+  "icons": [
+    {
+      "count": 1,
+      "color": "green",
+      "filename": "action-1-green.png",
+      "emoji_name": "action_1_green",
+      "railway_variable": "ACTION_EMOJI_1"
+    },
+    {
+      "count": 3,
+      "color": "blue",
+      "filename": "action-3-blue.png",
+      "emoji_name": "action_3_blue",
+      "railway_variable": "ACTION_EMOJI_3"
+    },
+    {
+      "count": 5,
+      "color": "yellow",
+      "filename": "action-5-yellow.png",
+      "emoji_name": "action_5_yellow",
+      "railway_variable": "ACTION_EMOJI_5"
+    },
+    {
+      "count": 10,
+      "color": "red",
+      "filename": "action-10-red.png",
+      "emoji_name": "action_10_red",
+      "railway_variable": "ACTION_EMOJI_10"
+    },
+    {
+      "count": 100,
+      "color": "purple",
+      "filename": "action-100-purple.png",
+      "emoji_name": "action_100_purple",
+      "railway_variable": "ACTION_EMOJI_100"
+    }
+  ],
+  "fallbacks": {
+    "1": "🟢",
+    "3": "🔵",
+    "5": "🟡",
+    "10": "🔴",
+    "100": "🟣"
+  }
+}
