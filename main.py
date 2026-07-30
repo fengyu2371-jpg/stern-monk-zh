@@ -2096,7 +2096,7 @@ class SafeModal(discord.ui.Modal):
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
 PLAYER_PANEL_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
-BUILD_VERSION = "2026-07-31-panel-lock-direct-edit-v10"
+BUILD_VERSION = "2026-07-31-bot-message-panel-lock-v11"
 
 
 def locked_operation_embed(
@@ -2200,9 +2200,9 @@ async def lock_player_panel_message(
     restarted: bool = False,
 ) -> bool:
     """Lock a panel with the bot token, without message-history access."""
-    # InteractionMessage.edit() 依賴原斜線指令的 webhook 權杖，時間一久便可能
-    # 失效。get_partial_message() 不會先讀取訊息，也不需要「讀取訊息歷史」
-    # 權限；它會直接用 Bot 權杖編輯指定訊息。
+    # v11 起玩家面板一律由頻道的 channel.send() 建立，因此訊息作者就是
+    # Bot 本身，可以長期使用 Bot 權杖編輯。get_partial_message() 不會先
+    # 讀取訊息，也不需要「讀取訊息歷史」權限。
     channel = getattr(message, "channel", None)
     get_partial_message = getattr(channel, "get_partial_message", None)
     editable_message = message
@@ -9592,10 +9592,13 @@ async def open_player_panel_page(
     *,
     embed: discord.Embed,
     view: discord.ui.View,
-) -> discord.InteractionMessage:
+) -> discord.Message:
     """Open a new player panel, then visibly lock the previous panel."""
     if not interaction.response.is_done():
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer(
+            thinking=True,
+            ephemeral=True,
+        )
 
     try:
         TOWN_LIFE_DB.get_snapshot(interaction.user.id)
@@ -9623,9 +9626,15 @@ async def open_player_panel_page(
                 previous_message.id,
             )
 
-    message = await interaction.edit_original_response(
+    # 斜線指令的原始回覆是互動 Webhook 訊息，只能在互動權杖有效期間內
+    # 編輯；Bot 權限再高也不能長期改寫其內容。玩家面板必須改由 Bot 在
+    # 頻道中送出一般訊息，才能在 5 分鐘後、新面板建立時或重啟後可靠鎖定。
+    channel = interaction.channel
+    send_message = getattr(channel, "send", None)
+    if not callable(send_message):
+        raise RuntimeError("目前頻道不支援建立玩家操作面板。")
+    message = await send_message(
         embed=embed,
-        attachments=[],
         view=view,
     )
 
@@ -9652,6 +9661,22 @@ async def open_player_panel_page(
             owner_name=interaction.user.display_name,
         )
 
+    try:
+        await interaction.edit_original_response(
+            content="新的操作面板已建立。",
+            embed=None,
+            attachments=[],
+            view=None,
+        )
+    except discord.HTTPException:
+        logger.warning(
+            "玩家面板已建立，但無法更新斜線指令的私人確認訊息："
+            "user_id=%s message_id=%s",
+            interaction.user.id,
+            message.id,
+            exc_info=True,
+        )
+
     return message
 
 
@@ -9659,7 +9684,10 @@ async def _open_student_data_panel(
     interaction: discord.Interaction,
 ) -> None:
     if not interaction.response.is_done():
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer(
+            thinking=True,
+            ephemeral=True,
+        )
 
     profile = ACADEMY_DB.get_profile_bundle(
         interaction.user.id
@@ -9703,7 +9731,10 @@ async def town_life_command(
     interaction: discord.Interaction,
 ) -> None:
     if not interaction.response.is_done():
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer(
+            thinking=True,
+            ephemeral=True,
+        )
     await open_player_panel_page(
         interaction,
         embed=town_life_home_embed(interaction.user.id),
