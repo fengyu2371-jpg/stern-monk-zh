@@ -2099,7 +2099,7 @@ class SafeModal(discord.ui.Modal):
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
 PLAYER_PANEL_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
-BUILD_VERSION = "2026-07-31-mining-ore-pickaxe-ui-v22"
+BUILD_VERSION = "2026-07-31-mining-four-buttons-one-row-v23"
 
 
 def locked_operation_embed(
@@ -8451,7 +8451,7 @@ class CrystalActionView(UserOwnedView):
             view=CrystalActionView(self.owner_id, self.area_key),
         )
 
-    @discord.ui.button(label="1 次", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="1 次", style=discord.ButtonStyle.secondary, row=0)
     async def run_once(
         self,
         interaction: discord.Interaction,
@@ -8459,7 +8459,7 @@ class CrystalActionView(UserOwnedView):
     ) -> None:
         await self._mine(interaction, 1)
 
-    @discord.ui.button(label="3 次", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="3 次", style=discord.ButtonStyle.secondary, row=0)
     async def run_three(
         self,
         interaction: discord.Interaction,
@@ -8467,7 +8467,7 @@ class CrystalActionView(UserOwnedView):
     ) -> None:
         await self._mine(interaction, 3)
 
-    @discord.ui.button(label="5 次", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="5 次", style=discord.ButtonStyle.secondary, row=0)
     async def run_five(
         self,
         interaction: discord.Interaction,
@@ -8475,7 +8475,7 @@ class CrystalActionView(UserOwnedView):
     ) -> None:
         await self._mine(interaction, 5)
 
-    @discord.ui.button(label="100 體", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="100 體", style=discord.ButtonStyle.secondary, row=0)
     async def run_budget(
         self,
         interaction: discord.Interaction,
@@ -8486,7 +8486,7 @@ class CrystalActionView(UserOwnedView):
     @discord.ui.button(
         label="返回選擇礦區",
         style=discord.ButtonStyle.secondary,
-        row=2,
+        row=1,
     )
     async def back(
         self,
