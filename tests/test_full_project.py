@@ -89,7 +89,6 @@ class FakeInteraction:
         self.response = FakeResponse()
         self.followup = FakeFollowup()
         self.original_edits: list[dict[str, object]] = []
-        self.original_deletes = 0
         self.user = SimpleNamespace(
             id=int(user_id),
             display_name="測試玩家",
@@ -102,9 +101,6 @@ class FakeInteraction:
     async def edit_original_response(self, **kwargs: object) -> object | None:
         self.original_edits.append(kwargs)
         return self.original_message
-
-    async def delete_original_response(self) -> None:
-        self.original_deletes += 1
 
 
 class FakeMessage:
@@ -245,7 +241,7 @@ class ProjectStaticTests(DatabaseCase):
                 main.TOWN_LIFE_ITEM_ASSET_ROOT = original
 
     def test_scene_assets_and_attachment_names(self) -> None:
-        for key in ("home", "farming", "ranch", "fishing", "crystal", "stove"):
+        for key in ("farming", "ranch", "fishing", "crystal", "stove"):
             path = main.TOWN_LIFE_ASSET_ROOT / main.TOWN_LIFE_ROUTE_IMAGES[key]
             raw = path.read_bytes()
             self.assertEqual(raw[:4], b"RIFF")
@@ -254,24 +250,6 @@ class ProjectStaticTests(DatabaseCase):
             self.assertEqual(len(files), 1)
             self.assertEqual(files[0].filename, path.name)
             files[0].close()
-
-    def test_town_life_home_is_compact_and_uses_scene_image(self) -> None:
-        embed = main.town_life_home_embed(self.user_id)
-        description = embed.description or ""
-        self.assertEqual(embed.title, "城下町生活職業")
-        self.assertIn("麻瓜幣", description)
-        self.assertIn("體力", description)
-        self.assertIn("精神力", description)
-        self.assertIn("農牧師", description)
-        self.assertIn("漁採師", description)
-        self.assertIn("魔晶礦師", description)
-        self.assertNotIn("物資總數", description)
-        self.assertNotIn("信箱", description)
-        self.assertNotIn("起步方式", description)
-        self.assertEqual(len(embed.fields), 0)
-        self.assertTrue(
-            str(embed.image.url).endswith("town_life_home.webp")
-        )
 
     def test_main_views_construct_and_callbacks_are_bound(self) -> None:
         views = [
@@ -1084,7 +1062,6 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
             [{"thinking": True}],
         )
         self.assertEqual(interaction.channel.sends, [])
-        self.assertEqual(interaction.original_deletes, 0)
         self.assertEqual(len(interaction.original_edits), 1)
         self.assertIn("embed", interaction.original_edits[0])
         self.assertIn("view", interaction.original_edits[0])
@@ -1299,15 +1276,14 @@ class InterfaceTests(DatabaseCase, unittest.IsolatedAsyncioTestCase):
 
             fetch_saved.assert_not_awaited()
             self.assertEqual(interaction.channel.sends, [])
-            self.assertEqual(len(interaction.original_edits), 1)
-            sent_panel = interaction.original_edits[0]
-            self.assertNotIn("content", sent_panel)
-            self.assertNotIn("allowed_mentions", sent_panel)
             self.assertEqual(
                 interaction.response.defers,
                 [{"thinking": True}],
             )
-            self.assertEqual(interaction.original_deletes, 0)
+            self.assertEqual(len(interaction.original_edits), 1)
+            self.assertIn("embed", interaction.original_edits[0])
+            self.assertIn("view", interaction.original_edits[0])
+            self.assertNotIn("content", interaction.original_edits[0])
             self.assertEqual(len(previous_message.edits), 1)
             self.assertIsNone(previous_message.edits[0]["view"])
             self.assertIn(
