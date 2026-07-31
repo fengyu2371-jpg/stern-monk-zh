@@ -2074,7 +2074,7 @@ class SafeModal(discord.ui.Modal):
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
 PLAYER_PANEL_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
-BUILD_VERSION = "2026-07-31-inline-error-reupload-v25"
+BUILD_VERSION = "2026-07-31-inline-error-content-v26"
 
 
 def locked_operation_embed(
@@ -3769,6 +3769,17 @@ class UserOwnedView(discord.ui.View):
         session.message = message
         session.owner_name = interaction.user.display_name
         session.touch()
+        message_content = str(getattr(message, "content", "") or "")
+        if message_content.startswith(TOWN_LIFE_INLINE_ERROR_PREFIX):
+            try:
+                # 只清除同一則訊息上的錯誤文字，不重新提交 Embed 或附件。
+                # 因此下一次操作不會觸發 Discord 的附件重新排版。
+                await message.edit(content=None)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                logger.warning(
+                    "無法清除城下町面板的舊錯誤文字：message_id=%s",
+                    getattr(message, "id", "unknown"),
+                )
         if self.auto_defer and not interaction.response.is_done():
             await interaction.response.defer()
         return True
@@ -7070,92 +7081,21 @@ def inventory_market_embed(
     return _town_life_embed_with_item_thumbnail(embed, selected_item_key)
 
 
-def _rebind_embed_attachment_urls(
-    embed: discord.Embed,
-    attachments: list[Any],
-) -> None:
-    """Restore attachment:// URLs after Discord resolves them to CDN URLs."""
-
-    def attachment_filename(url: str | None) -> str:
-        shown_url = str(url or "")
-        if not shown_url:
-            return ""
-        for attachment in attachments:
-            filename = str(getattr(attachment, "filename", "") or "")
-            if not filename:
-                continue
-            attachment_urls = {
-                str(getattr(attachment, "url", "") or ""),
-                str(getattr(attachment, "proxy_url", "") or ""),
-            }
-            if shown_url in attachment_urls or filename in shown_url:
-                return filename
-        return ""
-
-    image_filename = attachment_filename(embed.image.url)
-    if image_filename:
-        embed.set_image(url=f"attachment://{image_filename}")
-
-    thumbnail_filename = attachment_filename(embed.thumbnail.url)
-    if thumbnail_filename:
-        embed.set_thumbnail(url=f"attachment://{thumbnail_filename}")
-
-
-def _town_life_reupload_attachment_files(
-    attachments: list[Any],
-) -> list[discord.File]:
-    """Reopen town-life assets so edited embeds receive newly uploaded files."""
-    route_filenames = set(TOWN_LIFE_ROUTE_IMAGES.values())
-    files: list[discord.File] = []
-    seen_filenames: set[str] = set()
-    for attachment in attachments:
-        filename = str(getattr(attachment, "filename", "") or "")
-        if (
-            not filename
-            or filename in seen_filenames
-            or Path(filename).name != filename
-        ):
-            continue
-        seen_filenames.add(filename)
-        asset_path = (
-            TOWN_LIFE_ASSET_ROOT / filename
-            if filename in route_filenames
-            else TOWN_LIFE_ITEM_ASSET_ROOT / filename
-        )
-        if not asset_path.is_file():
-            logger.warning("無法重新上傳城下町面板附件：%s", asset_path)
-            continue
-        files.append(discord.File(asset_path, filename=filename))
-    return files
+TOWN_LIFE_INLINE_ERROR_PREFIX = "⚠️ **操作未完成**"
 
 
 async def _town_life_send_error(
     interaction: discord.Interaction,
     error: TownLifeError,
 ) -> None:
-    # 資源不足屬於目前頁面的操作結果，不應另開一則回覆訊息。
-    # 直接把原因寫回原面板，既保留按鈕，也避免玩家誤以為面板被取代。
+    # 資源不足屬於目前頁面的操作結果，不另開回覆訊息，也不重送 Embed。
+    # Discord 編輯含 attachment:// 圖片的 Embed 時可能把圖片改排成普通附件；
+    # 只更新同一則訊息的 content，原本的 Embed、附件與按鈕便完全不會變動。
     message = interaction.message
-    embeds = list(getattr(message, "embeds", []) or [])
-    if not interaction.response.is_done() and embeds:
-        embed = discord.Embed.from_dict(embeds[0].to_dict())
-        attachments = list(getattr(message, "attachments", []) or [])
-        _rebind_embed_attachment_urls(embed, attachments)
-        current_description = str(embed.description or "")
-        error_heading = "**操作未完成**"
-        if current_description.startswith(error_heading):
-            _, _, current_description = current_description.partition("\n\n")
-        notice = f"{error_heading}\n⚠️ {error}\n\n"
-        embed.description = notice + current_description[: 4096 - len(notice)]
-        edit_kwargs: dict[str, Any] = {"embed": embed}
-        if attachments:
-            # Discord 不一定會把保留下來的舊 Attachment 重新視為 Embed 內嵌圖，
-            # 即使 URL 已改回 attachment://，仍可能把原圖排列在 Embed 上方。
-            # 改為從部署素材重新上傳同名檔案，讓此次編輯建立真正的新綁定。
-            replacement_files = _town_life_reupload_attachment_files(attachments)
-            if replacement_files:
-                edit_kwargs["attachments"] = replacement_files
-        await interaction.response.edit_message(**edit_kwargs)
+    if not interaction.response.is_done() and message is not None:
+        await interaction.response.edit_message(
+            content=f"{TOWN_LIFE_INLINE_ERROR_PREFIX}\n{error}"
+        )
         return
     await send_ephemeral_message(interaction, str(error))
 
