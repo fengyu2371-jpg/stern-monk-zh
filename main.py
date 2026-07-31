@@ -2074,7 +2074,7 @@ class SafeModal(discord.ui.Modal):
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
 PLAYER_PANEL_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
-BUILD_VERSION = "2026-07-31-town-life-home-art-v21"
+BUILD_VERSION = "2026-07-31-inline-resource-errors-v23"
 
 
 def locked_operation_embed(
@@ -6473,9 +6473,25 @@ def workshop_embed(
         )
 
     if route_key == "crystal":
+        raw_crystal = int(inventory.get("raw_crystal", 0))
+        iron_ore = int(inventory.get("iron_ore", 0))
+        refined_crystal = int(inventory.get("refined_crystal", 0))
+        crystal_career_level = int(
+            snapshot["careers"].get("crystal", {"level": 1})["level"]
+        )
+        can_refine = (
+            crystal_career_level >= 2
+            and raw_crystal >= 2
+            and iron_ore >= 1
+            and int(player["stamina"]) >= 8
+            and int(player["spirit"]) >= 3
+        )
         recipe_lines.append(
             "**精煉魔法水晶**\n"
-            "魔法水晶原礦×2、鐵礦×1｜消耗 8 體力與 3 精神力"
+            "需求：魔法水晶原礦×2、鐵礦×1｜消耗 8 體力與 3 精神力\n"
+            f"持有：原礦 {raw_crystal}／2｜鐵礦 {iron_ore}／1｜"
+            f"精煉魔法水晶 {refined_crystal}\n"
+            f"狀態：{'可以精煉' if can_refine else '目前無法精煉'}"
         )
 
     meals = "｜".join(
@@ -6715,18 +6731,18 @@ def fishing_embed(
     action_details = {
         "fish": (
             "河岸釣魚",
-            "已選擇河岸釣魚。請在下方選擇執行次數或體力預算。",
+            "已選擇河岸釣魚。只有按下執行次數後才會消耗體力。",
         ),
         "forage": (
             "野外採集",
-            "已選擇野外採集。請在下方選擇執行次數或體力預算。",
+            "已選擇野外採集。只有按下執行次數後才會消耗體力。",
         ),
     }
     action_title, action_prompt = action_details.get(
         selected_action,
         (
-            "選擇地點",
-            "請先在下方選擇要前往河岸釣魚，或到野外採集。",
+            "選擇活動",
+            "請先選擇河岸釣魚或野外採集；選擇活動本身不會消耗體力。",
         ),
     )
     action_legend = ""
@@ -6749,6 +6765,7 @@ def fishing_embed(
             "體力不足完整批次時，會依剩餘體力完成可執行的次數。"
         )
     description = (
+        f"**位置**　城下町 › 漁採師 › {action_title}\n\n"
         f"**漁採師 Lv.{int(career['level'])}**｜經驗 {int(career['exp'])}｜"
         f"釣具 Lv.{fishing_rod_level}\n"
         f"**體力** {int(snapshot['player']['stamina'])}／{int(snapshot['player']['max_stamina'])}｜"
@@ -6758,41 +6775,101 @@ def fishing_embed(
     )
     if notice:
         description = f"**本次結果**｜{notice}\n\n{description}"
-    embed = monk_embed(f"漁採師｜{action_title}", description, color=0x4F7F91)
+    page_title = (
+        f"漁採師｜{action_title}｜選擇次數"
+        if selected_action in action_details
+        else "漁採師｜選擇活動"
+    )
+    embed = monk_embed(page_title, description, color=0x4F7F91)
+    embed.set_footer(
+        text=(
+            "目前只是在選擇活動，不會消耗資源。"
+            if selected_action not in action_details
+            else "按下執行次數後才會扣除體力；可先返回重新選擇活動。"
+        )
+    )
     embed = _town_life_embed_with_image(embed, "fishing")
     return _town_life_embed_with_item_thumbnail(embed, item_key)
 
 
-def mining_embed(user_id: int, *, notice: str = "", item_key: str = "") -> discord.Embed:
+def _mining_stamina_per_attempt(area_key: str, tool_level: int) -> int:
+    area = MINING_AREA_CONFIG[area_key]
+    required_tool = int(area["required_tool_level"])
+    efficiency = max(0, int(tool_level) - required_tool)
+    return max(
+        int(area["minimum_stamina_cost"]),
+        int(area["base_stamina_cost"]) - efficiency,
+    )
+
+
+def mining_embed(
+    user_id: int,
+    *,
+    notice: str = "",
+    item_key: str = "",
+    selected_area: str = "",
+) -> discord.Embed:
     snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
     career = snapshot["careers"].get("crystal", {"level": 1, "exp": 0})
     inventory = snapshot["inventory"]
     tool_level = int(snapshot["tools"].get("pickaxe", 0))
     career_level = int(career["level"])
 
+    selected = MINING_AREA_CONFIG.get(selected_area)
     area_lines: list[str] = []
-    for area in MINING_AREA_CONFIG.values():
+    for area_key, area in MINING_AREA_CONFIG.items():
         required_tool = int(area["required_tool_level"])
         required_career = int(area["required_career_level"])
         unlocked = tool_level >= required_tool and career_level >= required_career
-        status = "可進入" if unlocked else f"鎖定：工具 {required_tool}／職業 {required_career}"
+        stamina_cost = _mining_stamina_per_attempt(area_key, tool_level)
+        status = (
+            "可進入"
+            if unlocked
+            else f"未解鎖：工具 Lv.{required_tool}／職業 Lv.{required_career}"
+        )
         area_lines.append(
-            f"**{area['name']}**｜{status}｜"
-            f"{int(area['base_stamina_cost'])} 體／{int(area['spirit_cost'])} 精"
+            f"**{area['name']}**｜{status}\n"
+            f"每次 {stamina_cost} 體／{int(area['spirit_cost'])} 精｜"
+            f"{area['description']}"
         )
 
-    description = (
+    status_header = (
         f"**魔晶礦師 Lv.{career_level}**｜經驗 {int(career['exp'])}｜挖礦工具 Lv.{tool_level}\n"
         f"**體力** {int(snapshot['player']['stamina'])}／{int(snapshot['player']['max_stamina'])}｜"
         f"**精神力** {int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}\n"
-        f"原礦 {int(inventory.get('raw_crystal', 0))}｜鐵礦 {int(inventory.get('iron_ore', 0))}\n\n"
-        + "\n".join(area_lines)
-        + "\n\n可一次挖掘 1／3／5 次，或選擇最多消耗 100 體力。"
-        "\nLv.2 起可在工坊精煉魔法水晶。"
+        f"原礦 {int(inventory.get('raw_crystal', 0))}｜鐵礦 {int(inventory.get('iron_ore', 0))}"
     )
+    if selected is None:
+        title = "魔晶礦師｜選擇礦區"
+        description = (
+            "**位置**　城下町 › 魔晶礦師 › 選擇礦區\n\n"
+            f"{status_header}\n\n"
+            "**可前往的礦區**\n"
+            + "\n\n".join(area_lines)
+            + "\n\n先選擇礦區；這一步不會消耗體力或精神力。"
+        )
+        footer = "選定礦區後，下一頁才會顯示挖掘次數與完整消耗。"
+    else:
+        area_name = str(selected["name"])
+        stamina_cost = _mining_stamina_per_attempt(selected_area, tool_level)
+        spirit_cost = int(selected["spirit_cost"])
+        title = f"魔晶礦師｜{area_name}｜選擇次數"
+        description = (
+            f"**位置**　城下町 › 魔晶礦師 › {area_name}\n\n"
+            f"{status_header}\n\n"
+            f"**目前選區｜{area_name}**\n{selected['description']}\n\n"
+            "**次數與完整消耗**\n"
+            f"**1 次**｜{stamina_cost} 體／{spirit_cost} 精\n"
+            f"**3 次**｜{stamina_cost * 3} 體／{spirit_cost * 3} 精\n"
+            f"**5 次**｜{stamina_cost * 5} 體／{spirit_cost * 5} 精\n"
+            f"**100 體力預算**｜最多 {100 // stamina_cost} 次\n"
+            "資源不足完整批次時，會依剩餘體力與精神力完成可執行次數。"
+        )
+        footer = "只有按下挖掘次數後才會扣除資源；可先返回重新選區。"
     if notice:
         description = f"**本次結果**\n{notice}\n\n{description}"
-    embed = monk_embed("魔晶礦師｜高級礦坑", description, color=0x765A91)
+    embed = monk_embed(title, description, color=0x765A91)
+    embed.set_footer(text=footer)
     embed = _town_life_embed_with_image(embed, "crystal")
     return _town_life_embed_with_item_thumbnail(embed, item_key)
 
@@ -6997,6 +7074,20 @@ async def _town_life_send_error(
     interaction: discord.Interaction,
     error: TownLifeError,
 ) -> None:
+    # 資源不足屬於目前頁面的操作結果，不應另開一則回覆訊息。
+    # 直接把原因寫回原面板，既保留按鈕，也避免玩家誤以為面板被取代。
+    message = interaction.message
+    embeds = list(getattr(message, "embeds", []) or [])
+    if not interaction.response.is_done() and embeds:
+        embed = discord.Embed.from_dict(embeds[0].to_dict())
+        current_description = str(embed.description or "")
+        error_heading = "**操作未完成**"
+        if current_description.startswith(error_heading):
+            _, _, current_description = current_description.partition("\n\n")
+        notice = f"{error_heading}\n⚠️ {error}\n\n"
+        embed.description = notice + current_description[: 4096 - len(notice)]
+        await interaction.response.edit_message(embed=embed)
+        return
     await send_ephemeral_message(interaction, str(error))
 
 
@@ -7485,9 +7576,8 @@ class WorkshopView(UserOwnedView):
             raise ValueError(f"未知工坊路線：{route_key}")
         self.route_key = route_key
         self.tool_key = self.ROUTE_TO_TOOL[route_key]
-        tool_level = int(
-            TOWN_LIFE_DB.get_snapshot(owner_id)["tools"].get(self.tool_key, 0)
-        )
+        snapshot = TOWN_LIFE_DB.get_snapshot(owner_id)
+        tool_level = int(snapshot["tools"].get(self.tool_key, 0))
         tool_is_max = tool_level >= MAX_TOOL_LEVEL
 
         upgrade_button = discord.ui.Button(
@@ -7533,9 +7623,30 @@ class WorkshopView(UserOwnedView):
             self.add_item(button)
 
         if route_key == "crystal":
+            inventory = snapshot["inventory"]
+            player = snapshot["player"]
+            career_level = int(
+                snapshot["careers"].get("crystal", {"level": 1})["level"]
+            )
+            can_refine = (
+                career_level >= 2
+                and int(inventory.get("raw_crystal", 0)) >= 2
+                and int(inventory.get("iron_ore", 0)) >= 1
+                and int(player["stamina"]) >= 8
+                and int(player["spirit"]) >= 3
+            )
             refine_button = discord.ui.Button(
-                label="精煉魔法水晶",
-                style=discord.ButtonStyle.success,
+                label=(
+                    "精煉魔法水晶"
+                    if can_refine
+                    else "精煉｜條件不足"
+                ),
+                style=(
+                    discord.ButtonStyle.success
+                    if can_refine
+                    else discord.ButtonStyle.secondary
+                ),
+                disabled=not can_refine,
                 row=1,
             )
             refine_button.callback = self._refine_crystal
@@ -8078,7 +8189,7 @@ class FishingActionView(UserOwnedView):
         )
 
     @discord.ui.button(
-        label="返回選擇地點",
+        label="返回選擇活動",
         style=discord.ButtonStyle.secondary,
         row=2,
     )
@@ -8093,208 +8204,116 @@ class FishingActionView(UserOwnedView):
             view=FishingRouteView(self.owner_id),
         )
 
+    @discord.ui.button(
+        label="生活職業首頁",
+        style=discord.ButtonStyle.secondary,
+        row=2,
+    )
+    async def home(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=town_life_home_embed(self.owner_id),
+            attachments=town_life_home_attachments(),
+            view=TownLifeHubView(self.owner_id),
+        )
+
 
 class CrystalRouteView(UserOwnedView):
     def __init__(self, owner_id: int) -> None:
         super().__init__(owner_id, add_home_button=False)
+        snapshot = TOWN_LIFE_DB.get_snapshot(owner_id)
+        tool_level = int(snapshot["tools"].get("pickaxe", 0))
+        career_level = int(
+            snapshot["careers"].get("crystal", {"level": 1})["level"]
+        )
+        for area_key, button in (
+            ("outer_tunnel", self.outer_tunnel),
+            ("iron_depths", self.iron_depths),
+            ("crystal_cavern", self.crystal_cavern),
+        ):
+            area = MINING_AREA_CONFIG[area_key]
+            button.disabled = not (
+                tool_level >= int(area["required_tool_level"])
+                and career_level >= int(area["required_career_level"])
+            )
+            button.style = (
+                discord.ButtonStyle.secondary
+                if button.disabled
+                else discord.ButtonStyle.primary
+            )
 
-    async def _mine_area(
+    async def _open_area(
         self,
         interaction: discord.Interaction,
         area_key: str,
-        attempts: int,
-        *,
-        stamina_budget: int | None = None,
     ) -> None:
-        if not await _town_life_begin_action(self, interaction):
+        area = MINING_AREA_CONFIG.get(area_key)
+        if area is None:
+            await send_ephemeral_message(interaction, "找不到這個礦區。")
             return
-        try:
-            result = TOWN_LIFE_DB.mine(
-                self.owner_id,
-                area_key,
-                attempts,
-                stamina_budget=stamina_budget,
+        snapshot = TOWN_LIFE_DB.get_snapshot(self.owner_id)
+        tool_level = int(snapshot["tools"].get("pickaxe", 0))
+        career_level = int(
+            snapshot["careers"].get("crystal", {"level": 1})["level"]
+        )
+        required_tool = int(area["required_tool_level"])
+        required_career = int(area["required_career_level"])
+        if tool_level < required_tool or career_level < required_career:
+            await send_ephemeral_message(
+                interaction,
+                f"{area['name']}需要挖礦工具 Lv.{required_tool}，"
+                f"並且魔晶礦師達到 Lv.{required_career}。",
             )
-            _town_life_mark_committed(self)
-        except TownLifeError as exc:
-            _town_life_release_action(self)
-            await _town_life_send_error(interaction, exc)
             return
-        notice = _town_life_batch_notice(str(result["area_name"]), result)
-        item_key = str(result["item_key"])
         await interaction.response.edit_message(
             embed=mining_embed(
                 self.owner_id,
-                notice=notice,
-                item_key=item_key,
+                selected_area=area_key,
             ),
-            attachments=town_life_display_attachments(
-                route_key="crystal",
-                item_key=item_key,
-            ),
-            view=CrystalRouteView(self.owner_id),
+            attachments=town_life_route_attachments("crystal"),
+            view=MiningActionView(self.owner_id, area_key),
         )
 
     @discord.ui.button(
-        label="外圍×1",
+        label="外圍礦道",
         style=discord.ButtonStyle.primary,
         row=0,
     )
-    async def outer_tunnel_once(
+    async def outer_tunnel(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        await self._mine_area(interaction, "outer_tunnel", 1)
+        await self._open_area(interaction, "outer_tunnel")
 
     @discord.ui.button(
-        label="外圍×3",
+        label="深層鐵脈",
         style=discord.ButtonStyle.primary,
         row=0,
     )
-    async def outer_tunnel_three(
+    async def iron_depths(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        await self._mine_area(interaction, "outer_tunnel", 3)
+        await self._open_area(interaction, "iron_depths")
 
     @discord.ui.button(
-        label="外圍×5",
+        label="魔晶洞窟",
         style=discord.ButtonStyle.primary,
         row=0,
     )
-    async def outer_tunnel_five(
+    async def crystal_cavern(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        await self._mine_area(interaction, "outer_tunnel", 5)
+        await self._open_area(interaction, "crystal_cavern")
 
-    @discord.ui.button(
-        label="外圍｜100體",
-        style=discord.ButtonStyle.primary,
-        row=0,
-    )
-    async def outer_tunnel_budget(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await self._mine_area(
-            interaction,
-            "outer_tunnel",
-            100,
-            stamina_budget=100,
-        )
-
-    @discord.ui.button(
-        label="深層×1",
-        style=discord.ButtonStyle.primary,
-        row=1,
-    )
-    async def iron_depths_once(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await self._mine_area(interaction, "iron_depths", 1)
-
-    @discord.ui.button(
-        label="深層×3",
-        style=discord.ButtonStyle.primary,
-        row=1,
-    )
-    async def iron_depths_three(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await self._mine_area(interaction, "iron_depths", 3)
-
-    @discord.ui.button(
-        label="深層×5",
-        style=discord.ButtonStyle.primary,
-        row=1,
-    )
-    async def iron_depths_five(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await self._mine_area(interaction, "iron_depths", 5)
-
-    @discord.ui.button(
-        label="深層｜100體",
-        style=discord.ButtonStyle.primary,
-        row=1,
-    )
-    async def iron_depths_budget(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await self._mine_area(
-            interaction,
-            "iron_depths",
-            100,
-            stamina_budget=100,
-        )
-
-    @discord.ui.button(
-        label="洞窟×1",
-        style=discord.ButtonStyle.primary,
-        row=2,
-    )
-    async def crystal_cavern_once(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await self._mine_area(interaction, "crystal_cavern", 1)
-
-    @discord.ui.button(
-        label="洞窟×3",
-        style=discord.ButtonStyle.primary,
-        row=2,
-    )
-    async def crystal_cavern_three(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await self._mine_area(interaction, "crystal_cavern", 3)
-
-    @discord.ui.button(
-        label="洞窟×5",
-        style=discord.ButtonStyle.primary,
-        row=2,
-    )
-    async def crystal_cavern_five(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await self._mine_area(interaction, "crystal_cavern", 5)
-
-    @discord.ui.button(
-        label="洞窟｜100體",
-        style=discord.ButtonStyle.primary,
-        row=2,
-    )
-    async def crystal_cavern_budget(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await self._mine_area(
-            interaction,
-            "crystal_cavern",
-            100,
-            stamina_budget=100,
-        )
-
-    @discord.ui.button(label="礦坑工坊", style=discord.ButtonStyle.success, row=3)
+    @discord.ui.button(label="礦坑工坊", style=discord.ButtonStyle.success, row=1)
     async def workshop(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.edit_message(
             embed=workshop_embed(self.owner_id, "crystal"),
@@ -8302,7 +8321,7 @@ class CrystalRouteView(UserOwnedView):
             view=WorkshopView(self.owner_id, "crystal"),
         )
 
-    @discord.ui.button(label="背包與出售", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="背包與出售", style=discord.ButtonStyle.secondary, row=1)
     async def market(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.defer()
         snapshot = TOWN_LIFE_DB.get_snapshot(self.owner_id)
@@ -8327,8 +8346,121 @@ class CrystalRouteView(UserOwnedView):
             ),
         )
 
-    @discord.ui.button(label="返回生活職業", style=discord.ButtonStyle.secondary, row=4)
+    @discord.ui.button(label="返回生活職業", style=discord.ButtonStyle.secondary, row=2)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=town_life_home_embed(self.owner_id),
+            attachments=town_life_home_attachments(),
+            view=TownLifeHubView(self.owner_id),
+        )
+
+
+class MiningActionView(UserOwnedView):
+    def __init__(self, owner_id: int, area_key: str) -> None:
+        super().__init__(owner_id, add_home_button=False)
+        if area_key not in MINING_AREA_CONFIG:
+            raise ValueError(f"Unknown mining area: {area_key}")
+        self.area_key = area_key
+
+    async def _run_mining_action(
+        self,
+        interaction: discord.Interaction,
+        *,
+        attempts: int,
+        stamina_budget: int | None = None,
+    ) -> None:
+        if not await _town_life_begin_action(self, interaction):
+            return
+        try:
+            result = TOWN_LIFE_DB.mine(
+                self.owner_id,
+                self.area_key,
+                attempts,
+                stamina_budget=stamina_budget,
+            )
+            _town_life_mark_committed(self)
+        except TownLifeError as exc:
+            _town_life_release_action(self)
+            await _town_life_send_error(interaction, exc)
+            return
+        notice = _town_life_batch_notice(str(result["area_name"]), result)
+        item_key = str(result["item_key"])
+        await interaction.response.edit_message(
+            embed=mining_embed(
+                self.owner_id,
+                notice=notice,
+                item_key=item_key,
+                selected_area=self.area_key,
+            ),
+            attachments=town_life_display_attachments(
+                route_key="crystal",
+                item_key=item_key,
+            ),
+            view=MiningActionView(self.owner_id, self.area_key),
+        )
+
+    @discord.ui.button(label="1 次", style=discord.ButtonStyle.primary, row=0)
+    async def run_once(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._run_mining_action(interaction, attempts=1)
+
+    @discord.ui.button(label="3 次", style=discord.ButtonStyle.primary, row=0)
+    async def run_three(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._run_mining_action(interaction, attempts=3)
+
+    @discord.ui.button(label="5 次", style=discord.ButtonStyle.primary, row=0)
+    async def run_five(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._run_mining_action(interaction, attempts=5)
+
+    @discord.ui.button(label="100 體", style=discord.ButtonStyle.primary, row=1)
+    async def run_budget(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._run_mining_action(
+            interaction,
+            attempts=100,
+            stamina_budget=100,
+        )
+
+    @discord.ui.button(
+        label="返回選擇礦區",
+        style=discord.ButtonStyle.secondary,
+        row=2,
+    )
+    async def choose_area(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=mining_embed(self.owner_id),
+            attachments=town_life_route_attachments("crystal"),
+            view=CrystalRouteView(self.owner_id),
+        )
+
+    @discord.ui.button(
+        label="生活職業首頁",
+        style=discord.ButtonStyle.secondary,
+        row=2,
+    )
+    async def home(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
         await interaction.response.edit_message(
             embed=town_life_home_embed(self.owner_id),
             attachments=town_life_home_attachments(),
