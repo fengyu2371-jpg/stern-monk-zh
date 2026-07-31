@@ -2099,7 +2099,7 @@ class SafeModal(discord.ui.Modal):
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
 PLAYER_PANEL_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
-BUILD_VERSION = "2026-07-31-mining-pickaxe-ui-v21"
+BUILD_VERSION = "2026-07-31-mining-ore-pickaxe-ui-v22"
 
 
 def locked_operation_embed(
@@ -3233,18 +3233,37 @@ TOWN_LIFE_WORKSHOP_TOOLS: dict[str, str] = {
     "crystal": "pickaxe",
 }
 
-MINING_PICKAXE_EMOJIS: dict[str, discord.PartialEmoji] = {
+MINING_AREA_EMOJIS: dict[str, discord.PartialEmoji] = {
     "outer_tunnel": discord.PartialEmoji(
-        name="outer_pickaxe",
-        id=1532810484539981894,
+        name="outer_ore",
+        id=1532821357337776248,
     ),
     "iron_depths": discord.PartialEmoji(
-        name="iron_pickaxe",
-        id=1532810462700503221,
+        name="iron_ore",
+        id=1532821359300706395,
     ),
     "crystal_cavern": discord.PartialEmoji(
+        name="crystal_ore",
+        id=1532821361221963849,
+    ),
+}
+
+MINING_ATTEMPT_EMOJIS: dict[str, discord.PartialEmoji] = {
+    "once": discord.PartialEmoji(
+        name="outer_pickaxe",
+        id=1532819731143458816,
+    ),
+    "three": discord.PartialEmoji(
+        name="iron_pickaxe",
+        id=1532819692111003719,
+    ),
+    "five": discord.PartialEmoji(
         name="crystal_pickaxe",
-        id=1532810461257531593,
+        id=1532819573546418246,
+    ),
+    "budget": discord.PartialEmoji(
+        name="emerald_pickaxe",
+        id=1532820196723523838,
     ),
 }
 
@@ -6888,14 +6907,30 @@ def mining_embed(
         resource_cost = f"每次消耗 {stamina_cost} 體力"
         if spirit_cost:
             resource_cost += f"、{spirit_cost} 精神力"
+        attempt_lines = (
+            f"{MINING_ATTEMPT_EMOJIS['once']} 挖掘 1 次｜"
+            f"{stamina_cost} 體"
+            + (f"／{spirit_cost} 精" if spirit_cost else "")
+            + "\n"
+            f"{MINING_ATTEMPT_EMOJIS['three']} 挖掘 3 次｜"
+            f"{stamina_cost * 3} 體"
+            + (f"／{spirit_cost * 3} 精" if spirit_cost else "")
+            + "\n"
+            f"{MINING_ATTEMPT_EMOJIS['five']} 挖掘 5 次｜"
+            f"{stamina_cost * 5} 體"
+            + (f"／{spirit_cost * 5} 精" if spirit_cost else "")
+            + "\n"
+            f"{MINING_ATTEMPT_EMOJIS['budget']} 最多使用 100 體"
+        )
         description = (
             f"**魔晶礦師 Lv.{career_level}**｜挖礦工具 Lv.{tool_level}\n"
             f"**體力** {int(snapshot['player']['stamina'])}／{int(snapshot['player']['max_stamina'])}｜"
             f"**精神力** {int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}\n\n"
             f"**{area['name']}**\n"
             f"{area['description']}\n\n"
-            f"{resource_cost}\n"
-            "請在下方選擇挖掘次數；100 體會依目前可用資源執行。"
+            f"{resource_cost}\n\n"
+            f"{attempt_lines}\n\n"
+            "按下對應十字鎬執行；翠綠十字鎬會依目前可用資源計算次數。"
         )
         title = f"魔晶礦師｜{area['name']}"
     else:
@@ -6914,7 +6949,7 @@ def mining_embed(
             if spirit_cost:
                 cost_text += f"／{spirit_cost} 精"
             area_lines.append(
-                f"{MINING_PICKAXE_EMOJIS[area_key]} "
+                f"{MINING_AREA_EMOJIS[area_key]} "
                 f"**{area['name']}**｜{status}\n"
                 f"每次 {cost_text}"
             )
@@ -8265,7 +8300,7 @@ class CrystalRouteView(UserOwnedView):
         )
 
     @discord.ui.button(
-        emoji=MINING_PICKAXE_EMOJIS["outer_tunnel"],
+        emoji=MINING_AREA_EMOJIS["outer_tunnel"],
         style=discord.ButtonStyle.primary,
         row=0,
     )
@@ -8277,7 +8312,7 @@ class CrystalRouteView(UserOwnedView):
         await self._open_area(interaction, "outer_tunnel")
 
     @discord.ui.button(
-        emoji=MINING_PICKAXE_EMOJIS["iron_depths"],
+        emoji=MINING_AREA_EMOJIS["iron_depths"],
         style=discord.ButtonStyle.primary,
         row=0,
     )
@@ -8289,7 +8324,7 @@ class CrystalRouteView(UserOwnedView):
         await self._open_area(interaction, "iron_depths")
 
     @discord.ui.button(
-        emoji=MINING_PICKAXE_EMOJIS["crystal_cavern"],
+        emoji=MINING_AREA_EMOJIS["crystal_cavern"],
         style=discord.ButtonStyle.primary,
         row=0,
     )
@@ -8370,14 +8405,14 @@ class CrystalActionView(UserOwnedView):
         if area_key not in self.VALID_AREAS:
             raise ValueError(f"Unknown mining area: {area_key}")
         self.area_key = area_key
-        area_emoji = MINING_PICKAXE_EMOJIS[area_key]
-        for button in (
-            self.run_once,
-            self.run_three,
-            self.run_five,
-            self.run_budget,
+        for button, attempt_key in (
+            (self.run_once, "once"),
+            (self.run_three, "three"),
+            (self.run_five, "five"),
+            (self.run_budget, "budget"),
         ):
-            button.emoji = area_emoji
+            button.label = None
+            button.emoji = MINING_ATTEMPT_EMOJIS[attempt_key]
 
     async def _mine(
         self,
