@@ -2074,7 +2074,7 @@ class SafeModal(discord.ui.Modal):
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
 PLAYER_PANEL_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
-BUILD_VERSION = "2026-07-31-inline-error-attachments-v24"
+BUILD_VERSION = "2026-07-31-inline-error-reupload-v25"
 
 
 def locked_operation_embed(
@@ -7101,6 +7101,34 @@ def _rebind_embed_attachment_urls(
         embed.set_thumbnail(url=f"attachment://{thumbnail_filename}")
 
 
+def _town_life_reupload_attachment_files(
+    attachments: list[Any],
+) -> list[discord.File]:
+    """Reopen town-life assets so edited embeds receive newly uploaded files."""
+    route_filenames = set(TOWN_LIFE_ROUTE_IMAGES.values())
+    files: list[discord.File] = []
+    seen_filenames: set[str] = set()
+    for attachment in attachments:
+        filename = str(getattr(attachment, "filename", "") or "")
+        if (
+            not filename
+            or filename in seen_filenames
+            or Path(filename).name != filename
+        ):
+            continue
+        seen_filenames.add(filename)
+        asset_path = (
+            TOWN_LIFE_ASSET_ROOT / filename
+            if filename in route_filenames
+            else TOWN_LIFE_ITEM_ASSET_ROOT / filename
+        )
+        if not asset_path.is_file():
+            logger.warning("無法重新上傳城下町面板附件：%s", asset_path)
+            continue
+        files.append(discord.File(asset_path, filename=filename))
+    return files
+
+
 async def _town_life_send_error(
     interaction: discord.Interaction,
     error: TownLifeError,
@@ -7121,7 +7149,12 @@ async def _town_life_send_error(
         embed.description = notice + current_description[: 4096 - len(notice)]
         edit_kwargs: dict[str, Any] = {"embed": embed}
         if attachments:
-            edit_kwargs["attachments"] = attachments
+            # Discord 不一定會把保留下來的舊 Attachment 重新視為 Embed 內嵌圖，
+            # 即使 URL 已改回 attachment://，仍可能把原圖排列在 Embed 上方。
+            # 改為從部署素材重新上傳同名檔案，讓此次編輯建立真正的新綁定。
+            replacement_files = _town_life_reupload_attachment_files(attachments)
+            if replacement_files:
+                edit_kwargs["attachments"] = replacement_files
         await interaction.response.edit_message(**edit_kwargs)
         return
     await send_ephemeral_message(interaction, str(error))
