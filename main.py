@@ -2099,7 +2099,7 @@ class SafeModal(discord.ui.Modal):
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
 PLAYER_PANEL_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
-BUILD_VERSION = "2026-07-31-mining-four-buttons-one-row-v23"
+BUILD_VERSION = "2026-07-31-mining-pickaxe-labels-v24"
 
 
 def locked_operation_embed(
@@ -8411,7 +8411,6 @@ class CrystalActionView(UserOwnedView):
             (self.run_five, "five"),
             (self.run_budget, "budget"),
         ):
-            button.label = None
             button.emoji = MINING_ATTEMPT_EMOJIS[attempt_key]
 
     async def _mine(

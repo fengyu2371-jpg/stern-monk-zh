@@ -216,8 +216,8 @@ player_panels
 
 工具高於礦區最低門檻時，會略微降低該次採礦的體力消耗；高等工具也可能增加單次礦物數量。
 三顆礦區表符固定使用 `outer_ore`、`iron_ore`、`crystal_ore`；
-進入礦區後，四顆純表符按鍵依序使用 `outer_pickaxe`、`iron_pickaxe`、
-`crystal_pickaxe`、`emerald_pickaxe`，分別代表挖掘 1／3／5 次與最多使用 100 體力；
+進入礦區後，四顆按鍵依序顯示「十字鎬表符＋1 次／3 次／5 次／100 體」；
+表符固定使用 `outer_pickaxe`、`iron_pickaxe`、`crystal_pickaxe`、`emerald_pickaxe`；
 未達門檻的礦區按鍵會停用。
 
 ## v29.2 工坊、精神力與料理
