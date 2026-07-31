@@ -2074,7 +2074,7 @@ class SafeModal(discord.ui.Modal):
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
 PLAYER_PANEL_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
-BUILD_VERSION = "2026-07-31-inline-resource-errors-v23"
+BUILD_VERSION = "2026-07-31-inline-error-attachments-v24"
 
 
 def locked_operation_embed(
@@ -7070,6 +7070,37 @@ def inventory_market_embed(
     return _town_life_embed_with_item_thumbnail(embed, selected_item_key)
 
 
+def _rebind_embed_attachment_urls(
+    embed: discord.Embed,
+    attachments: list[Any],
+) -> None:
+    """Restore attachment:// URLs after Discord resolves them to CDN URLs."""
+
+    def attachment_filename(url: str | None) -> str:
+        shown_url = str(url or "")
+        if not shown_url:
+            return ""
+        for attachment in attachments:
+            filename = str(getattr(attachment, "filename", "") or "")
+            if not filename:
+                continue
+            attachment_urls = {
+                str(getattr(attachment, "url", "") or ""),
+                str(getattr(attachment, "proxy_url", "") or ""),
+            }
+            if shown_url in attachment_urls or filename in shown_url:
+                return filename
+        return ""
+
+    image_filename = attachment_filename(embed.image.url)
+    if image_filename:
+        embed.set_image(url=f"attachment://{image_filename}")
+
+    thumbnail_filename = attachment_filename(embed.thumbnail.url)
+    if thumbnail_filename:
+        embed.set_thumbnail(url=f"attachment://{thumbnail_filename}")
+
+
 async def _town_life_send_error(
     interaction: discord.Interaction,
     error: TownLifeError,
@@ -7080,13 +7111,18 @@ async def _town_life_send_error(
     embeds = list(getattr(message, "embeds", []) or [])
     if not interaction.response.is_done() and embeds:
         embed = discord.Embed.from_dict(embeds[0].to_dict())
+        attachments = list(getattr(message, "attachments", []) or [])
+        _rebind_embed_attachment_urls(embed, attachments)
         current_description = str(embed.description or "")
         error_heading = "**操作未完成**"
         if current_description.startswith(error_heading):
             _, _, current_description = current_description.partition("\n\n")
         notice = f"{error_heading}\n⚠️ {error}\n\n"
         embed.description = notice + current_description[: 4096 - len(notice)]
-        await interaction.response.edit_message(embed=embed)
+        edit_kwargs: dict[str, Any] = {"embed": embed}
+        if attachments:
+            edit_kwargs["attachments"] = attachments
+        await interaction.response.edit_message(**edit_kwargs)
         return
     await send_ephemeral_message(interaction, str(error))
 
