@@ -244,6 +244,16 @@ UPGRADE_MATERIAL_KEYS = {
 }
 
 
+# 取得機率較低，或需要高階採集／精煉才能取得的素材。
+# 這份名單和升級素材名單刻意分開：同一項物品可以同時屬於兩者。
+RARE_MATERIAL_KEYS = {
+    "silver_carp",
+    "moon_trout",
+    "raw_crystal",
+    "refined_crystal",
+}
+
+
 FOOD_RECIPE_CONFIG: dict[str, dict[str, Any]] = {
     "grilled_fish": {
         "name": "炭烤河魚",

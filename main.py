@@ -1956,6 +1956,7 @@ from town_life import (
     MAX_TOOL_LEVEL,
     MINING_AREA_CONFIG,
     POTION_CONFIG,
+    RARE_MATERIAL_KEYS,
     TOOL_CONFIG,
     TOOL_UPGRADE_SPIRIT_COSTS,
     UPGRADE_MATERIAL_KEYS,
@@ -2099,7 +2100,7 @@ class SafeModal(discord.ui.Modal):
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
 PLAYER_PANEL_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
-BUILD_VERSION = "2026-08-01-single-item-selling-v28"
+BUILD_VERSION = "2026-08-01-protected-sale-confirm-v29"
 
 
 def locked_operation_embed(
@@ -7019,14 +7020,23 @@ INVENTORY_CATEGORY_LABELS: dict[str, str] = {
 }
 INVENTORY_PAGE_SIZE = 5
 UPGRADE_MATERIAL_WARNING = "⚠ 升級素材"
+RARE_MATERIAL_WARNING = "◆ 稀有素材"
 
 
 def _inventory_item_display_name(item_key: str) -> str:
-    """在背包與販售介面標出工具升級素材。"""
+    """在背包與販售介面標出需要留意的素材。"""
     name = item_name(item_key)
+    warnings = []
     if item_key in UPGRADE_MATERIAL_KEYS:
-        return f"{name}｜{UPGRADE_MATERIAL_WARNING}"
-    return name
+        warnings.append(UPGRADE_MATERIAL_WARNING)
+    if item_key in RARE_MATERIAL_KEYS:
+        warnings.append(RARE_MATERIAL_WARNING)
+    return "｜".join([name, *warnings])
+
+
+def _inventory_sale_requires_confirmation(item_key: str) -> bool:
+    """Rare and upgrade materials always require a second confirmation."""
+    return item_key in UPGRADE_MATERIAL_KEYS or item_key in RARE_MATERIAL_KEYS
 
 
 def _inventory_upgrade_reserve(snapshot: dict[str, Any]) -> dict[str, int]:
@@ -8894,10 +8904,20 @@ class InventoryItemSelect(discord.ui.Select):
             discord.SelectOption(
                 label=_inventory_item_display_name(key),
                 value=key,
-                description=(
-                    f"持有 {int(inventory.get(key, 0))} 份｜出售時保留升級需求"
-                    if key in UPGRADE_MATERIAL_KEYS
-                    else f"持有 {int(inventory.get(key, 0))} 份"
+                description="｜".join(
+                    [
+                        f"持有 {int(inventory.get(key, 0))} 份",
+                        *(
+                            ["出售時保留升級需求"]
+                            if key in UPGRADE_MATERIAL_KEYS
+                            else []
+                        ),
+                        *(
+                            ["出售前需要再次確認"]
+                            if key in RARE_MATERIAL_KEYS
+                            else []
+                        ),
+                    ]
                 ),
                 default=(key == selected_item_key),
             )
@@ -9121,6 +9141,9 @@ class InventoryMarketView(UserOwnedView):
             if key in UPGRADE_MATERIAL_KEYS:
                 lines.append(f"標示：{UPGRADE_MATERIAL_WARNING}")
                 lines.append("保護：系統會先保留三套工具下一級所需數量，只出售多出的部分。")
+            if key in RARE_MATERIAL_KEYS:
+                lines.append(f"標示：{RARE_MATERIAL_WARNING}")
+                lines.append("保護：出售 1 個、5 個或全部，都必須再次確認。")
         detail_embed = monk_embed(
             f"{_inventory_item_display_name(key)}｜詳細說明",
             "\n".join(lines[1:]),
@@ -9209,13 +9232,61 @@ class InventoryMarketView(UserOwnedView):
             ),
         )
 
+    async def _request_selected_sale(
+        self,
+        interaction: discord.Interaction,
+        quantity: int | None,
+    ) -> None:
+        key = self.selected_item_key
+        if not key:
+            await send_ephemeral_message(interaction, "請先選擇要出售的物品。")
+            return
+
+        snapshot = TOWN_LIFE_DB.get_snapshot(self.owner_id)
+        sale_state = _inventory_sale_state(snapshot, key)
+        requested = sale_state["sellable"] if quantity is None else int(quantity)
+        if requested <= 0:
+            await send_ephemeral_message(interaction, f"{item_name(key)}目前沒有可出售的數量。")
+            return
+        if requested > sale_state["sellable"]:
+            await send_ephemeral_message(
+                interaction,
+                f"{item_name(key)}目前可出售 {sale_state['sellable']} 個，"
+                f"不足以出售 {requested} 個。",
+            )
+            return
+
+        # 稀有／升級素材即使只賣一個也要確認；出售全部則不分種類一律確認。
+        if quantity is None or _inventory_sale_requires_confirmation(key):
+            await edit_component_message(
+                interaction,
+                embed=inventory_item_sell_confirm_embed(
+                    self.owner_id,
+                    item_key=key,
+                    quantity=quantity,
+                    snapshot=snapshot,
+                ),
+                attachments=_inventory_selected_attachments(key),
+                view=InventoryItemSellConfirmView(
+                    self.owner_id,
+                    item_key=key,
+                    quantity=quantity,
+                    category=self.category,
+                    page=self.page,
+                    snapshot=snapshot,
+                ),
+            )
+            return
+
+        await self._sell_selected(interaction, quantity)
+
     @discord.ui.button(label="出售 1 個", style=discord.ButtonStyle.success, row=3)
     async def sell_one(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        await self._sell_selected(interaction, 1)
+        await self._request_selected_sale(interaction, 1)
 
     @discord.ui.button(label="出售 5 個", style=discord.ButtonStyle.success, row=3)
     async def sell_five(
@@ -9223,7 +9294,7 @@ class InventoryMarketView(UserOwnedView):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        await self._sell_selected(interaction, 5)
+        await self._request_selected_sale(interaction, 5)
 
     @discord.ui.button(label="出售此物全部", style=discord.ButtonStyle.success, row=3)
     async def sell_selected_all(
@@ -9231,7 +9302,7 @@ class InventoryMarketView(UserOwnedView):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        await self._sell_selected(interaction, None)
+        await self._request_selected_sale(interaction, None)
 
     @discord.ui.button(label="批次出售", style=discord.ButtonStyle.danger, row=3)
     async def batch_sell(
@@ -9265,6 +9336,156 @@ class InventoryMarketView(UserOwnedView):
             attachments=[],
             view=TownLifeHubView(self.owner_id),
         )
+
+
+def inventory_item_sell_confirm_embed(
+    user_id: int,
+    *,
+    item_key: str,
+    quantity: int | None,
+    snapshot: dict[str, Any] | None = None,
+) -> discord.Embed:
+    if snapshot is None:
+        snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
+    state = _inventory_sale_state(snapshot, item_key)
+    sell_quantity = state["sellable"] if quantity is None else int(quantity)
+    sell_quantity = max(0, min(sell_quantity, state["sellable"]))
+    tags = []
+    warnings = []
+    if item_key in UPGRADE_MATERIAL_KEYS:
+        tags.append(UPGRADE_MATERIAL_WARNING)
+        warnings.append("售出後可能影響工具升級進度；系統保留量不會被出售。")
+    if item_key in RARE_MATERIAL_KEYS:
+        tags.append(RARE_MATERIAL_WARNING)
+        warnings.append("這項素材取得較不容易，請確認是否真的要出售。")
+    if not tags:
+        tags.append("出售全部前再次確認")
+
+    after_sale = max(0, state["owned"] - sell_quantity)
+    description = "\n\n".join(
+        [
+            _town_life_section(
+                "出售物品",
+                f"**{item_name(item_key)}**",
+                "｜".join(tags),
+            ),
+            _town_life_section(
+                "數量與收入",
+                f"**持有數量**｜{state['owned']} 個",
+                f"**本次出售**｜{sell_quantity} 個",
+                f"**系統保留**｜{state['protected']} 個",
+                f"**出售後剩餘**｜{after_sale} 個",
+                f"**預計獲得**｜{sell_quantity * state['price']} 麻瓜幣",
+            ),
+            _town_life_section("出售提醒", *warnings),
+        ]
+    )
+    embed = monk_embed("河岸市集｜確認出售", description, color=0xA45A52)
+    return _town_life_embed_with_item_thumbnail(embed, item_key)
+
+
+class InventoryItemSellConfirmView(UserOwnedView):
+    def __init__(
+        self,
+        owner_id: int,
+        *,
+        item_key: str,
+        quantity: int | None,
+        category: str,
+        page: int,
+        snapshot: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(owner_id, add_home_button=False, auto_defer=True)
+        if snapshot is None:
+            snapshot = TOWN_LIFE_DB.get_snapshot(owner_id)
+        self.item_key = item_key
+        self.quantity = quantity
+        self.category = category if category in INVENTORY_CATEGORY_LABELS else "farming"
+        self.page = max(0, int(page))
+        state = _inventory_sale_state(snapshot, item_key)
+        requested = state["sellable"] if quantity is None else int(quantity)
+        self.confirm_sale.label = (
+            f"確認出售全部（{requested} 個）"
+            if quantity is None
+            else f"確認出售 {requested} 個"
+        )
+        self.confirm_sale.disabled = requested <= 0 or requested > state["sellable"]
+
+    async def _return_to_inventory(
+        self,
+        interaction: discord.Interaction,
+        *,
+        notice: str = "",
+    ) -> None:
+        snapshot = TOWN_LIFE_DB.get_snapshot(self.owner_id)
+        keys = _inventory_keys(
+            self.owner_id,
+            self.category,
+            inventory=snapshot["inventory"],
+        )
+        page_count = max(1, (len(keys) + INVENTORY_PAGE_SIZE - 1) // INVENTORY_PAGE_SIZE)
+        page = max(0, min(self.page, page_count - 1))
+        page_keys = keys[page * INVENTORY_PAGE_SIZE:(page + 1) * INVENTORY_PAGE_SIZE]
+        selected = self.item_key if self.item_key in page_keys else (page_keys[0] if page_keys else "")
+        await edit_component_message(
+            interaction,
+            embed=inventory_market_embed(
+                self.owner_id,
+                notice=notice,
+                selected_item_key=selected,
+                category=self.category,
+                page=page,
+                snapshot=snapshot,
+            ),
+            attachments=_inventory_selected_attachments(selected),
+            view=InventoryMarketView(
+                self.owner_id,
+                selected_item_key=selected,
+                category=self.category,
+                page=page,
+                snapshot=snapshot,
+            ),
+        )
+
+    @discord.ui.button(label="確認出售", style=discord.ButtonStyle.danger, row=0)
+    async def confirm_sale(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if not await _town_life_begin_action(self, interaction):
+            return
+        try:
+            result = TOWN_LIFE_DB.sell_item(
+                self.owner_id,
+                self.item_key,
+                self.quantity,
+            )
+            _town_life_mark_committed(self)
+        except TownLifeError as exc:
+            _town_life_release_action(self)
+            await _town_life_send_error(interaction, exc)
+            return
+        protected_text = (
+            f"｜保留升級素材 {int(result['protected'])} 個"
+            if int(result.get("protected", 0)) > 0
+            else ""
+        )
+        await self._return_to_inventory(
+            interaction,
+            notice=(
+                f"出售{item_name(self.item_key)}×{int(result['quantity'])}｜"
+                f"+{int(result['coins'])} 麻瓜幣{protected_text}"
+            ),
+        )
+
+    @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary, row=0)
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._return_to_inventory(interaction)
 
 
 def inventory_batch_sell_confirm_embed(
@@ -9302,6 +9523,7 @@ def inventory_batch_sell_confirm_embed(
             _town_life_section(
                 "出售保護",
                 "標有 ⚠ 升級素材的物品，仍會保留三套工具下一級所需數量。",
+                "標有 ◆ 稀有素材的物品已包含在本次確認範圍內。",
                 "按下確認後才會實際出售；返回背包不會變更物品。",
             ),
         ]
