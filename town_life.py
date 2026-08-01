@@ -1990,3 +1990,69 @@ class TownLifeDatabase:
             )
             conn.commit()
         return {"sold": sold, "protected": protected, "coins": total}
+
+    def sell_item(
+        self,
+        user_id: int,
+        item_key: str,
+        quantity: int | None,
+    ) -> dict[str, Any]:
+        """Sell one selected item while preserving future tool-upgrade materials.
+
+        Passing ``None`` sells every currently sellable copy. A numeric request is
+        exact: it is rejected when fewer copies are available, so a stale button
+        can never silently sell a different quantity than its label promised.
+        """
+        item = ITEM_CONFIG.get(item_key)
+        if item is None:
+            raise TownLifeError("找不到這項物品。")
+        sell_price = int(item.get("sell", 0))
+        if sell_price <= 0:
+            raise TownLifeError(f"{item_name(item_key)}不可出售。")
+        if quantity is not None and int(quantity) <= 0:
+            raise TownLifeError("出售數量必須大於零。")
+
+        with closing(self.connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._ensure_player(conn, user_id)
+            owned = self._inventory_quantity(conn, user_id, item_key)
+            reserve = self._next_upgrade_material_reserve(conn, user_id)
+            protected = (
+                min(owned, int(reserve.get(item_key, 0)))
+                if item_key in UPGRADE_MATERIAL_KEYS
+                else 0
+            )
+            sellable = max(0, owned - protected)
+            if sellable <= 0:
+                if protected > 0:
+                    raise TownLifeError(
+                        f"{item_name(item_key)}目前都屬於受保護的升級素材，"
+                        "沒有可出售的數量。"
+                    )
+                raise TownLifeError(f"背包裡沒有可出售的{item_name(item_key)}。")
+
+            sell_quantity = sellable if quantity is None else int(quantity)
+            if sell_quantity > sellable:
+                raise TownLifeError(
+                    f"{item_name(item_key)}目前可出售 {sellable} 個，"
+                    f"不足以出售 {sell_quantity} 個。"
+                )
+
+            total = sell_price * sell_quantity
+            self._change_inventory(conn, user_id, item_key, -sell_quantity)
+            player = self._refresh_stamina(conn, user_id)
+            coins = int(player["coins"])
+            now = now_iso()
+            conn.execute(
+                "UPDATE town_life_players SET coins = ?, updated_at = ? WHERE user_id = ?",
+                (coins + total, now, str(user_id)),
+            )
+            conn.commit()
+
+        return {
+            "item_key": item_key,
+            "quantity": sell_quantity,
+            "unit_price": sell_price,
+            "coins": total,
+            "protected": protected,
+        }
