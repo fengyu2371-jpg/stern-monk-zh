@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# stern-monk-zh-tw v30 Taipei daily stamina and spirit reset
+# stern-monk-zh-tw v31 food stamina recovery without a daily cap
 # 主要程式碼集中於本檔；data/ 僅保存修士 Bot 台詞資料。
 
 
@@ -1952,7 +1952,6 @@ from town_life import (
     CROP_CONFIG,
     FOOD_RECIPE_CONFIG,
     ITEM_CONFIG,
-    MAX_DAILY_FOOD_STAMINA,
     MAX_TOOL_LEVEL,
     MINING_AREA_CONFIG,
     POTION_CONFIG,
@@ -2100,7 +2099,7 @@ class SafeModal(discord.ui.Modal):
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
 PLAYER_PANEL_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
-BUILD_VERSION = "2026-08-01-taipei-daily-resource-reset-v30"
+BUILD_VERSION = "2026-08-01-food-stamina-no-daily-cap-v31"
 
 
 def locked_operation_embed(
@@ -6557,7 +6556,6 @@ def workshop_embed(
     snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
     player = snapshot["player"]
     inventory = snapshot["inventory"]
-    stamina_daily_remaining = _food_stamina_daily_remaining(player)
     level = int(snapshot["tools"].get(tool_key, 0))
 
     if level >= 5:
@@ -6606,8 +6604,7 @@ def workshop_embed(
                 "目前狀態",
                 f"**麻瓜幣** {int(player['coins'])}｜"
                 f"**體力** {int(player['stamina'])}／{int(player['max_stamina'])}",
-                f"**精神力** {int(player['spirit'])}／{int(player['max_spirit'])}｜"
-                f"**今日料理可回體** {stamina_daily_remaining}／{MAX_DAILY_FOOD_STAMINA}",
+                f"**精神力** {int(player['spirit'])}／{int(player['max_spirit'])}",
             ),
             _town_life_section(
                 "工具升級",
@@ -7157,15 +7154,6 @@ def _inventory_selected_attachments(selected_item_key: str) -> list[discord.File
     return town_life_item_attachments(selected_item_key) if selected_item_key else []
 
 
-def _food_stamina_daily_remaining(player: dict[str, Any]) -> int:
-    recovered_today = (
-        int(player.get("food_stamina_recovered") or 0)
-        if str(player.get("food_stamina_date") or "") == taipei_today().isoformat()
-        else 0
-    )
-    return max(0, MAX_DAILY_FOOD_STAMINA - recovered_today)
-
-
 def _inventory_initial_state(
     user_id: int,
     preferred_category: str = "farming",
@@ -7214,7 +7202,6 @@ def inventory_market_embed(
         snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
     inventory = snapshot["inventory"]
     player = snapshot["player"]
-    stamina_daily_remaining = _food_stamina_daily_remaining(player)
     if category not in INVENTORY_CATEGORY_LABELS:
         category = "farming"
     keys = _inventory_keys(
@@ -7234,8 +7221,7 @@ def inventory_market_embed(
             "目前狀態",
             f"**麻瓜幣**：{int(player['coins'])}｜"
             f"**體力**：{int(player['stamina'])}／{int(player['max_stamina'])}",
-            f"**精神力**：{int(player['spirit'])}／{int(player['max_spirit'])}｜"
-            f"**今日料理可回體**：{stamina_daily_remaining}／{MAX_DAILY_FOOD_STAMINA}",
+            f"**精神力**：{int(player['spirit'])}／{int(player['max_spirit'])}",
         ),
         _town_life_section(
             "分類與頁數",
@@ -7731,7 +7717,6 @@ class MealEatSelect(discord.ui.Select):
         self.route_key = route_key
         snapshot = TOWN_LIFE_DB.get_snapshot(owner_id)
         inventory = snapshot["inventory"]
-        stamina_daily_remaining = _food_stamina_daily_remaining(snapshot["player"])
         options = [
             discord.SelectOption(
                 label=f"食用 {recipe['name']}",
@@ -7739,8 +7724,7 @@ class MealEatSelect(discord.ui.Select):
                 description=(
                     f"持有 {int(inventory.get(key, 0))} 份｜"
                     f"+{int(recipe.get('stamina_restore', 0))} 體／"
-                    f"+{int(recipe['spirit_restore'])} 精｜"
-                    f"今日可回體 {stamina_daily_remaining}"
+                    f"+{int(recipe['spirit_restore'])} 精"
                 ),
             )
             for key, recipe in FOOD_RECIPE_CONFIG.items()
@@ -9028,13 +9012,8 @@ class InventoryMarketView(UserOwnedView):
             player = snapshot["player"]
             stamina_full = int(player["stamina"]) >= int(player["max_stamina"])
             spirit_full = int(player["spirit"]) >= int(player["max_spirit"])
-            stamina_daily_remaining = _food_stamina_daily_remaining(player)
-            blocked_by_daily_cap = not stamina_full and stamina_daily_remaining <= 0
-            if spirit_full and (stamina_full or blocked_by_daily_cap):
+            if spirit_full and stamina_full:
                 label = "目前不需食用"
-                disabled = True
-            elif blocked_by_daily_cap:
-                label = "今日回體已達上限"
                 disabled = True
             elif stamina_full:
                 label = "食用一份（只回精神）"
