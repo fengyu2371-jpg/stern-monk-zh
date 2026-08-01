@@ -2099,7 +2099,7 @@ class SafeModal(discord.ui.Modal):
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
 PLAYER_PANEL_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
-BUILD_VERSION = "2026-08-01-town-life-layout-v26"
+BUILD_VERSION = "2026-08-01-upgrade-material-warning-v27"
 
 
 def locked_operation_embed(
@@ -7018,6 +7018,15 @@ INVENTORY_CATEGORY_LABELS: dict[str, str] = {
     "other": "種子與補給",
 }
 INVENTORY_PAGE_SIZE = 5
+UPGRADE_MATERIAL_WARNING = "⚠ 升級素材"
+
+
+def _inventory_item_display_name(item_key: str) -> str:
+    """在背包與販售介面標出工具升級素材。"""
+    name = item_name(item_key)
+    if item_key in UPGRADE_MATERIAL_KEYS:
+        return f"{name}｜{UPGRADE_MATERIAL_WARNING}"
+    return name
 
 
 def _inventory_category(item_key: str) -> str:
@@ -7192,7 +7201,7 @@ def inventory_market_embed(
             summary = "不可出售"
         sections.append(
             _town_life_section(
-                f"目前查看｜{item_name(selected_item_key)}",
+                f"目前查看｜{_inventory_item_display_name(selected_item_key)}",
                 f"**持有數量** ×{quantity}",
                 f"**用途／售價**｜{summary}",
             )
@@ -7203,7 +7212,9 @@ def inventory_market_embed(
     if page_keys:
         page_lines = []
         for key in page_keys:
-            page_lines.append(f"**{item_name(key)}** ×{int(inventory.get(key, 0))}")
+            page_lines.append(
+                f"**{_inventory_item_display_name(key)}** ×{int(inventory.get(key, 0))}"
+            )
         sections.append(_town_life_section("本頁物品", "\n".join(page_lines)))
 
     description = _town_life_notice(notice) + "\n\n".join(sections)
@@ -8822,9 +8833,13 @@ class InventoryItemSelect(discord.ui.Select):
         page_keys = keys[self.page * INVENTORY_PAGE_SIZE:(self.page + 1) * INVENTORY_PAGE_SIZE]
         options = [
             discord.SelectOption(
-                label=item_name(key),
+                label=_inventory_item_display_name(key),
                 value=key,
-                description=f"持有 {int(inventory.get(key, 0))} 份",
+                description=(
+                    f"持有 {int(inventory.get(key, 0))} 份｜出售時保留升級需求"
+                    if key in UPGRADE_MATERIAL_KEYS
+                    else f"持有 {int(inventory.get(key, 0))} 份"
+                ),
                 default=(key == selected_item_key),
             )
             for key in page_keys
@@ -9040,9 +9055,10 @@ class InventoryMarketView(UserOwnedView):
             price = int(item.get("sell", 0))
             lines.append(f"販售：{'每份 ' + str(price) + ' 麻瓜幣' if price > 0 else '不可出售'}")
             if key in UPGRADE_MATERIAL_KEYS:
+                lines.append(f"標示：{UPGRADE_MATERIAL_WARNING}")
                 lines.append("保護：系統會先保留三套工具下一級所需數量，只出售多出的部分。")
         detail_embed = monk_embed(
-            f"{item_name(key)}｜詳細說明",
+            f"{_inventory_item_display_name(key)}｜詳細說明",
             "\n".join(lines[1:]),
             color=0x8C744B,
         )
