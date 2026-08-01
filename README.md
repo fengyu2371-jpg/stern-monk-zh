@@ -220,6 +220,9 @@ player_panels
 表符固定使用 `outer_pickaxe`、`iron_pickaxe`、`crystal_pickaxe`、`emerald_pickaxe`；
 未達門檻的礦區按鍵會停用。
 
+礦區選擇頁與挖掘操作頁使用粗體小標、分段留白與完整單位整理資訊；
+目前狀態、進入條件、單次消耗與各挖掘檔位會分開顯示，表符與按鍵用途維持不變。
+
 ## v29.2 工坊、精神力與料理
 
 ### 各區工坊

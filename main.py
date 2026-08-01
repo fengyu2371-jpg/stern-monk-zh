@@ -2099,7 +2099,7 @@ class SafeModal(discord.ui.Modal):
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
 PLAYER_PANEL_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
-BUILD_VERSION = "2026-07-31-mining-pickaxe-labels-v24"
+BUILD_VERSION = "2026-08-01-mining-layout-v25"
 
 
 def locked_operation_embed(
@@ -6904,33 +6904,37 @@ def mining_embed(
             selected_area_key,
             tool_level,
         )
-        resource_cost = f"每次消耗 {stamina_cost} 體力"
+        single_cost = f"**{stamina_cost} 體力**"
         if spirit_cost:
-            resource_cost += f"、{spirit_cost} 精神力"
+            single_cost += f"／**{spirit_cost} 精神力**"
         attempt_lines = (
-            f"{MINING_ATTEMPT_EMOJIS['once']} 挖掘 1 次｜"
-            f"{stamina_cost} 體"
-            + (f"／{spirit_cost} 精" if spirit_cost else "")
+            f"{MINING_ATTEMPT_EMOJIS['once']} **1 次**｜"
+            f"{stamina_cost} 體力"
+            + (f"／{spirit_cost} 精神力" if spirit_cost else "")
             + "\n"
-            f"{MINING_ATTEMPT_EMOJIS['three']} 挖掘 3 次｜"
-            f"{stamina_cost * 3} 體"
-            + (f"／{spirit_cost * 3} 精" if spirit_cost else "")
+            f"{MINING_ATTEMPT_EMOJIS['three']} **3 次**｜"
+            f"{stamina_cost * 3} 體力"
+            + (f"／{spirit_cost * 3} 精神力" if spirit_cost else "")
             + "\n"
-            f"{MINING_ATTEMPT_EMOJIS['five']} 挖掘 5 次｜"
-            f"{stamina_cost * 5} 體"
-            + (f"／{spirit_cost * 5} 精" if spirit_cost else "")
+            f"{MINING_ATTEMPT_EMOJIS['five']} **5 次**｜"
+            f"{stamina_cost * 5} 體力"
+            + (f"／{spirit_cost * 5} 精神力" if spirit_cost else "")
             + "\n"
-            f"{MINING_ATTEMPT_EMOJIS['budget']} 最多使用 100 體"
+            f"{MINING_ATTEMPT_EMOJIS['budget']} **100 體預算**｜"
+            "依目前可用資源執行"
         )
         description = (
-            f"**魔晶礦師 Lv.{career_level}**｜挖礦工具 Lv.{tool_level}\n"
+            "**目前狀態**\n"
+            f"**魔晶礦師** Lv.{career_level}｜**挖礦工具** Lv.{tool_level}\n"
             f"**體力** {int(snapshot['player']['stamina'])}／{int(snapshot['player']['max_stamina'])}｜"
             f"**精神力** {int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}\n\n"
+            "**礦區資訊**\n"
             f"**{area['name']}**\n"
             f"{area['description']}\n\n"
-            f"{resource_cost}\n\n"
+            f"**單次消耗**｜{single_cost}\n\n"
+            "**選擇挖掘方式**\n"
             f"{attempt_lines}\n\n"
-            "按下對應十字鎬執行；翠綠十字鎬會依目前可用資源計算次數。"
+            "*按下對應十字鎬執行；100 體預算會依目前可用資源計算次數。*"
         )
         title = f"魔晶礦師｜{area['name']}"
     else:
@@ -6939,31 +6943,36 @@ def mining_embed(
             required_tool = int(area["required_tool_level"])
             required_career = int(area["required_career_level"])
             unlocked = tool_level >= required_tool and career_level >= required_career
-            status = (
-                "可進入"
+            status = "**可進入**" if unlocked else "**尚未解鎖**"
+            requirement = (
+                "已符合進入條件"
                 if unlocked
-                else f"需工具 Lv.{required_tool}、職業 Lv.{required_career}"
+                else f"需要工具 Lv.{required_tool}、職業 Lv.{required_career}"
             )
             stamina_cost, spirit_cost = _mining_attempt_cost(area_key, tool_level)
-            cost_text = f"{stamina_cost} 體"
+            cost_text = f"{stamina_cost} 體力"
             if spirit_cost:
-                cost_text += f"／{spirit_cost} 精"
+                cost_text += f"／{spirit_cost} 精神力"
             area_lines.append(
                 f"{MINING_AREA_EMOJIS[area_key]} "
                 f"**{area['name']}**｜{status}\n"
-                f"每次 {cost_text}"
+                f"**進入條件**｜{requirement}\n"
+                f"**單次消耗**｜{cost_text}"
             )
 
         description = (
-            f"**魔晶礦師 Lv.{career_level}**｜挖礦工具 Lv.{tool_level}\n\n"
+            "**目前狀態**\n"
+            f"**魔晶礦師** Lv.{career_level}｜**挖礦工具** Lv.{tool_level}\n"
+            f"**體力** {int(snapshot['player']['stamina'])}／{int(snapshot['player']['max_stamina'])}｜"
+            f"**精神力** {int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}\n\n"
+            "**選擇礦區**\n"
             + "\n\n".join(area_lines)
-            + "\n\n選擇礦區不會消耗任何資源。"
-            "\nLv.2 起可在工坊精煉魔法水晶。"
+            + "\n\n*選擇礦區不會消耗資源；Lv.2 起可在工坊精煉魔法水晶。*"
         )
         title = "魔晶礦師｜選擇礦區"
 
     if notice:
-        description = f"**本次結果**\n{notice}\n\n{description}"
+        description = f"**本次挖掘結果**\n{notice}\n\n{description}"
     embed = monk_embed(title, description, color=0x765A91)
     embed = _town_life_embed_with_image(embed, "crystal")
     return _town_life_embed_with_item_thumbnail(embed, item_key)
