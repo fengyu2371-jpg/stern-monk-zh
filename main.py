@@ -2099,7 +2099,7 @@ class SafeModal(discord.ui.Modal):
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
 PLAYER_PANEL_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
-BUILD_VERSION = "2026-08-01-mining-layout-v25"
+BUILD_VERSION = "2026-08-01-town-life-layout-v26"
 
 
 def locked_operation_embed(
@@ -6445,6 +6445,16 @@ def _town_life_career_text(snapshot: dict[str, Any]) -> str:
     )
 
 
+def _town_life_section(title: str, *lines: str) -> str:
+    """Build one consistent markdown section for town-life embeds."""
+    content = "\n".join(str(line) for line in lines if str(line))
+    return f"**{title}**\n{content}" if content else f"**{title}**"
+
+
+def _town_life_notice(notice: str) -> str:
+    return _town_life_section("本次結果", notice) + "\n\n" if notice else ""
+
+
 def town_life_home_embed(
     user_id: int,
     *,
@@ -6456,40 +6466,32 @@ def town_life_home_embed(
     unclaimed_mail = sum(
         1 for mail in snapshot["mailbox"] if not str(mail["claimed_at"])
     )
-    description = (
-        "城下町的生活職業以生產、採集與工具成長為核心。"
-        "三條路線可以同時發展，不需要永久鎖定職業。\n\n"
-        f"**麻瓜幣**：{int(player['coins'])}\n"
-        f"**體力**：{int(player['stamina'])}／{int(player['max_stamina'])}"
-        "（每分鐘恢復 1 點；每天凌晨 00:00 重置）\n"
-        f"**精神力**：{int(player['spirit'])}／{int(player['max_spirit'])}"
-        "（透過料理或每日休息恢復）\n"
-        f"**物資總數**：{inventory_total}\n"
-        f"**信箱**：{'有 ' + str(unclaimed_mail) + ' 封待領' if unclaimed_mail else '沒有待領附件'}\n"
-        f"**工具**：{_town_life_tool_text(snapshot)}"
+    mail_text = (
+        f"有 {unclaimed_mail} 封待領"
+        if unclaimed_mail
+        else "沒有待領附件"
     )
-    if notice:
-        description = f"**本次結果**\n{notice}\n\n{description}"
-    embed = monk_embed(
-        "城下町生活職業",
-        description,
-        color=0x6B8E5E,
+    description = _town_life_notice(notice) + "\n\n".join(
+        (
+            _town_life_section(
+                "目前狀態",
+                f"**麻瓜幣** {int(player['coins'])}｜"
+                f"**體力** {int(player['stamina'])}／{int(player['max_stamina'])}",
+                f"**精神力** {int(player['spirit'])}／{int(player['max_spirit'])}｜"
+                f"**物資總數** {inventory_total}",
+                f"**信箱** {mail_text}",
+            ),
+            _town_life_section("職業進度", _town_life_career_text(snapshot)),
+            _town_life_section("工具等級", _town_life_tool_text(snapshot)),
+            _town_life_section(
+                "開始遊玩",
+                "三條職業可以同時發展，不需要永久鎖定。",
+                "Lv.1 基礎工具只需要麻瓜幣；後續升級才需要採集素材。",
+                "*沒有工具時仍可先到野外採集，累積第一筆資金。*",
+            ),
+        )
     )
-    embed.add_field(
-        name="三條職業路線",
-        value=_town_life_career_text(snapshot),
-        inline=False,
-    )
-    embed.add_field(
-        name="起步方式",
-        value=(
-            "初始有 600 麻瓜幣。Lv.1 基礎工具只需要麻瓜幣；"
-            "後續升級要帶採礦與採集素材到各區工坊。"
-            "沒有工具時仍可前往河岸採集，慢慢累積資金。"
-        ),
-        inline=False,
-    )
-    return embed
+    return monk_embed("城下町生活職業", description, color=0x6B8E5E)
 
 
 def tool_shop_embed(user_id: int, *, notice: str = "") -> discord.Embed:
@@ -6515,16 +6517,20 @@ def tool_shop_embed(user_id: int, *, notice: str = "") -> discord.Embed:
             )
         lines.append(
             f"**{info['workshop']}｜{info['name']} Lv.{level}**\n"
-            f"{info['description']}\n{next_text}"
+            f"{info['description']}\n"
+            f"**下一階段**｜{next_text}"
         )
-    description = (
-        f"目前麻瓜幣：**{int(player['coins'])}**\n"
-        f"精神力：**{int(player['spirit'])}／{int(player['max_spirit'])}**\n\n"
-        + "\n\n".join(lines)
-        + "\n\nLv.1 工具不需要素材；升級後必須帶礦石、木材或魔晶到對應工坊。"
+    description = _town_life_notice(notice) + "\n\n".join(
+        (
+            _town_life_section(
+                "目前狀態",
+                f"**麻瓜幣** {int(player['coins'])}｜"
+                f"**精神力** {int(player['spirit'])}／{int(player['max_spirit'])}",
+            ),
+            _town_life_section("選擇工坊", "\n\n".join(lines)),
+            "*Lv.1 工具不需要素材；後續升級需帶指定素材到對應工坊。*",
+        )
     )
-    if notice:
-        description = f"**本次結果**\n{notice}\n\n{description}"
     return monk_embed("工匠街｜工坊總覽", description, color=0x8A6F47)
 
 
@@ -6593,18 +6599,29 @@ def workshop_embed(
         f"{recipe['name']}×{int(inventory.get(key, 0))}"
         for key, recipe in FOOD_RECIPE_CONFIG.items()
     )
-    description = (
-        f"**麻瓜幣**：{int(player['coins'])}\n"
-        f"**體力**：{int(player['stamina'])}／{int(player['max_stamina'])}\n"
-        f"**精神力**：{int(player['spirit'])}／{int(player['max_spirit'])}\n"
-        f"**今日料理可回體**：{stamina_daily_remaining}／{MAX_DAILY_FOOD_STAMINA}\n"
-        f"**{info['name']}**：Lv.{level}\n"
-        f"**下一階段**：{upgrade_text}\n\n"
-        + ("\n\n".join(recipe_lines) if recipe_lines else "這個工坊目前沒有料理配方。")
-        + f"\n\n**料理行囊**：{meals}"
+    description = _town_life_notice(notice) + "\n\n".join(
+        (
+            _town_life_section(
+                "目前狀態",
+                f"**麻瓜幣** {int(player['coins'])}｜"
+                f"**體力** {int(player['stamina'])}／{int(player['max_stamina'])}",
+                f"**精神力** {int(player['spirit'])}／{int(player['max_spirit'])}｜"
+                f"**今日料理可回體** {stamina_daily_remaining}／{MAX_DAILY_FOOD_STAMINA}",
+            ),
+            _town_life_section(
+                "工具升級",
+                f"**{info['name']}** Lv.{level}",
+                f"**下一階段**｜{upgrade_text}",
+            ),
+            _town_life_section(
+                "可製作項目",
+                "\n\n".join(recipe_lines)
+                if recipe_lines
+                else "這個工坊目前沒有料理配方。",
+            ),
+            _town_life_section("料理行囊", meals),
+        )
     )
-    if notice:
-        description = f"**本次結果**\n{notice}\n\n{description}"
     embed = monk_embed(str(info["workshop"]), description, color=colors[route_key])
     return _town_life_embed_with_item_thumbnail(
         embed,
@@ -6625,18 +6642,20 @@ def stove_embed(
     if selected_recipe_key not in FOOD_RECIPE_CONFIG:
         selected_recipe_key = next(iter(FOOD_RECIPE_CONFIG), "")
 
-    description = (
-        f"**麻瓜幣** {int(player['coins'])}｜"
-        f"**體力** {int(player['stamina'])}／{int(player['max_stamina'])}｜"
-        f"**精神力** {int(player['spirit'])}／{int(player['max_spirit'])}\n"
-        f"**體力藥水** ×{int(inventory.get('stamina_potion', 0))}｜"
-        "售價 250 麻瓜幣\n\n"
-        "從下方選單挑一道料理，再確認材料與恢復效果。"
-    )
-    if notice:
-        description = f"**本次結果**｜{notice}\n\n{description}"
-
-    embed = monk_embed("灶台料理", description, color=0xA86737)
+    sections = [
+        _town_life_section(
+            "目前狀態",
+            f"**麻瓜幣** {int(player['coins'])}｜"
+            f"**體力** {int(player['stamina'])}／{int(player['max_stamina'])}",
+            f"**精神力** {int(player['spirit'])}／{int(player['max_spirit'])}｜"
+            f"**體力藥水** ×{int(inventory.get('stamina_potion', 0))}",
+        ),
+        _town_life_section(
+            "料理方式",
+            "從下方選單挑一道料理，再確認材料與恢復效果。",
+            "體力藥水售價為 250 麻瓜幣。",
+        ),
+    ]
 
     if selected_recipe_key:
         recipe = FOOD_RECIPE_CONFIG[selected_recipe_key]
@@ -6654,18 +6673,19 @@ def stove_embed(
                 f"{item_name(mat_key)} {owned}／{required}"
             )
 
-        embed.add_field(
-            name=f"目前選擇｜{recipe['name']}",
-            value=(
-                f"**恢復**：+{int(recipe.get('stamina_restore', 0))} 體力／"
-                f"+{int(recipe['spirit_restore'])} 精神力\n"
-                f"**材料**：{'｜'.join(ingredient_lines)}\n"
-                f"**持有料理**：{int(inventory.get(selected_recipe_key, 0))} 份\n"
-                f"**狀態**：{'可以料理' if can_cook else '材料不足'}"
-            ),
-            inline=False,
+        sections.append(
+            _town_life_section(
+                f"目前選擇｜{recipe['name']}",
+                f"**恢復效果**｜+{int(recipe.get('stamina_restore', 0))} 體力／"
+                f"+{int(recipe['spirit_restore'])} 精神力",
+                f"**所需材料**｜{'｜'.join(ingredient_lines)}",
+                f"**持有料理**｜{int(inventory.get(selected_recipe_key, 0))} 份",
+                f"**製作狀態**｜{'可以料理' if can_cook else '材料不足'}",
+            )
         )
 
+    description = _town_life_notice(notice) + "\n\n".join(sections)
+    embed = monk_embed("灶台料理", description, color=0xA86737)
     embed.set_footer(text="料理完成後會放入背包；請到背包食用。")
     return _town_life_embed_with_image(
         _town_life_embed_with_item_thumbnail(
@@ -6687,21 +6707,24 @@ def farm_embed(user_id: int, *, notice: str = "", item_key: str = "") -> discord
         else:
             crop_name = str(CROP_CONFIG[crop_key]["name"])
             status = f"{crop_name}｜{format_remaining(str(plot['ready_at']))}"
-        plots.append(f"田地 {int(plot['plot_no'])}：{status}")
+        plots.append(f"**田地 {int(plot['plot_no'])}**｜{status}")
     seed_text = "｜".join(
         f"{ITEM_CONFIG[str(info['seed'])]['name']}×{int(inventory.get(str(info['seed']), 0))}"
         for info in CROP_CONFIG.values()
     )
-    description = (
-        f"**農具組**：Lv.{int(snapshot['tools'].get('farm_tools', 0))}\n"
-        f"**體力**：{int(snapshot['player']['stamina'])}／{int(snapshot['player']['max_stamina'])}\n"
-        f"**精神力**：{int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}\n"
-        f"**種子**：{seed_text}\n\n"
-        + "\n".join(plots)
-        + "\n\n播種會自動填滿可用空地，最多三塊；成熟後可一次收成。"
+    description = _town_life_notice(notice) + "\n\n".join(
+        (
+            _town_life_section(
+                "目前狀態",
+                f"**農具組** Lv.{int(snapshot['tools'].get('farm_tools', 0))}｜"
+                f"**體力** {int(snapshot['player']['stamina'])}／{int(snapshot['player']['max_stamina'])}",
+                f"**精神力** {int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}",
+            ),
+            _town_life_section("持有種子", seed_text),
+            _town_life_section("田地狀態", "\n".join(plots)),
+            "*播種會自動填滿可用空地，最多三塊；成熟後可一次收成。*",
+        )
     )
-    if notice:
-        description = f"**本次結果**\n{notice}\n\n{description}"
     embed = monk_embed("農牧師｜三塊農田", description, color=0x76965A)
     embed = _town_life_embed_with_image(embed, "farming")
     return _town_life_embed_with_item_thumbnail(embed, item_key)
@@ -6790,23 +6813,30 @@ def ranch_embed(user_id: int, *, notice: str = "", item_key: str = "") -> discor
         coins=coins,
         today=today,
     )
-    description = (
-        "**位置**　城下町 › 農牧師 › 畜牧場\n\n"
-        f"**下一步**\n{next_action}\n\n"
-        "**今日狀態**\n"
-        f"🐔 雞 {int(chicken['quantity'])}／10｜"
-        f"{_ranch_animal_status(chicken, 'chicken', feed_quantity=feed_quantity, today=today)}\n"
-        f"🐄 牛 {int(cow['quantity'])}／10｜"
-        f"{_ranch_animal_status(cow, 'cow', feed_quantity=feed_quantity, today=today)}\n\n"
-        "**持有資源**\n"
-        f"飼料 {feed_quantity} 份｜今日尚需 {remaining_feed_need} 份\n"
-        f"麻瓜幣 {coins}｜農具組 Lv.{tool_level}\n"
-        f"精神力 {int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}\n\n"
-        f"購買價格：雞 {ANIMAL_CONFIG['chicken']['cost']}（農具 Lv.1）｜"
-        f"牛 {ANIMAL_CONFIG['cow']['cost']}（農具 Lv.2）"
+    description = _town_life_notice(notice) + "\n\n".join(
+        (
+            _town_life_section("目前位置", "城下町 › 農牧師 › 畜牧場"),
+            _town_life_section("下一步", next_action),
+            _town_life_section(
+                "今日畜牧",
+                f"**雞** {int(chicken['quantity'])}／10｜"
+                f"{_ranch_animal_status(chicken, 'chicken', feed_quantity=feed_quantity, today=today)}",
+                f"**牛** {int(cow['quantity'])}／10｜"
+                f"{_ranch_animal_status(cow, 'cow', feed_quantity=feed_quantity, today=today)}",
+            ),
+            _town_life_section(
+                "持有資源",
+                f"**飼料** {feed_quantity} 份｜**今日尚需** {remaining_feed_need} 份",
+                f"**麻瓜幣** {coins}｜**農具組** Lv.{tool_level}",
+                f"**精神力** {int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}",
+            ),
+            _town_life_section(
+                "購買條件",
+                f"**雞** {ANIMAL_CONFIG['chicken']['cost']} 麻瓜幣｜農具 Lv.1",
+                f"**牛** {ANIMAL_CONFIG['cow']['cost']} 麻瓜幣｜農具 Lv.2",
+            ),
+        )
     )
-    if notice:
-        description = f"**本次結果**\n✅ {notice}\n\n{description}"
     embed = monk_embed("農牧師｜畜牧場", description, color=0xA07B4F)
     if not notice:
         embed = _town_life_embed_with_image(embed, "ranch")
@@ -6848,7 +6878,7 @@ def fishing_embed(
             else 6
         )
         action_legend = (
-            "\n\n**次數與體力消耗**\n"
+            "**選擇執行方式**\n"
             "**1 次**｜"
             f"消耗 {stamina_per_attempt} 體力\n"
             "**5 次**｜"
@@ -6857,18 +6887,22 @@ def fishing_embed(
             f"完整執行消耗 {stamina_per_attempt * 10} 體力\n"
             "**100 體力預算**｜"
             f"最多 {100 // stamina_per_attempt} 次\n"
-            "體力不足完整批次時，會依剩餘體力完成可執行的次數。"
+            "*體力不足完整批次時，會依剩餘體力完成可執行的次數。*"
         )
-    description = (
-        f"**漁採師 Lv.{int(career['level'])}**｜經驗 {int(career['exp'])}｜"
-        f"釣具 Lv.{fishing_rod_level}\n"
-        f"**體力** {int(snapshot['player']['stamina'])}／{int(snapshot['player']['max_stamina'])}｜"
-        f"**精神力** {int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}\n\n"
-        "釣魚需要釣具；野外採集不需要工具。\n"
-        f"{action_prompt}{action_legend}"
-    )
-    if notice:
-        description = f"**本次結果**｜{notice}\n\n{description}"
+    sections = [
+        _town_life_section(
+            "目前狀態",
+            f"**漁採師** Lv.{int(career['level'])}｜**經驗** {int(career['exp'])}｜"
+            f"**釣具** Lv.{fishing_rod_level}",
+            f"**體力** {int(snapshot['player']['stamina'])}／{int(snapshot['player']['max_stamina'])}｜"
+            f"**精神力** {int(snapshot['player']['spirit'])}／{int(snapshot['player']['max_spirit'])}",
+        ),
+        _town_life_section("地點資訊", action_prompt),
+    ]
+    if action_legend:
+        sections.append(action_legend)
+    sections.append("*釣魚需要釣具；野外採集不需要工具。*")
+    description = _town_life_notice(notice) + "\n\n".join(sections)
     embed = monk_embed(f"漁採師｜{action_title}", description, color=0x4F7F91)
     embed = _town_life_embed_with_image(embed, "fishing")
     return _town_life_embed_with_item_thumbnail(embed, item_key)
@@ -6971,8 +7005,7 @@ def mining_embed(
         )
         title = "魔晶礦師｜選擇礦區"
 
-    if notice:
-        description = f"**本次挖掘結果**\n{notice}\n\n{description}"
+    description = _town_life_notice(notice) + description
     embed = monk_embed(title, description, color=0x765A91)
     embed = _town_life_embed_with_image(embed, "crystal")
     return _town_life_embed_with_item_thumbnail(embed, item_key)
@@ -7122,12 +7155,18 @@ def inventory_market_embed(
     if selected_item_key not in page_keys:
         selected_item_key = page_keys[0] if page_keys else ""
 
-    lines = [
-        f"**麻瓜幣**：{int(player['coins'])}",
-        f"**體力**：{int(player['stamina'])}／{int(player['max_stamina'])}",
-        f"**精神力**：{int(player['spirit'])}／{int(player['max_spirit'])}",
-        f"**今日料理可回體**：{stamina_daily_remaining}／{MAX_DAILY_FOOD_STAMINA}",
-        f"**分類**：{INVENTORY_CATEGORY_LABELS[category]}｜第 {page + 1}／{page_count} 頁",
+    sections = [
+        _town_life_section(
+            "目前狀態",
+            f"**麻瓜幣**：{int(player['coins'])}｜"
+            f"**體力**：{int(player['stamina'])}／{int(player['max_stamina'])}",
+            f"**精神力**：{int(player['spirit'])}／{int(player['max_spirit'])}｜"
+            f"**今日料理可回體**：{stamina_daily_remaining}／{MAX_DAILY_FOOD_STAMINA}",
+        ),
+        _town_life_section(
+            "分類與頁數",
+            f"**{INVENTORY_CATEGORY_LABELS[category]}**｜第 {page + 1}／{page_count} 頁",
+        ),
     ]
 
     if selected_item_key:
@@ -7151,22 +7190,23 @@ def inventory_market_embed(
             summary = f"單價 {sell_price} 麻瓜幣"
         else:
             summary = "不可出售"
-        lines += [
-            "",
-            f"**目前查看：{item_name(selected_item_key)}**",
-            f"持有×{quantity}｜{summary}",
-        ]
+        sections.append(
+            _town_life_section(
+                f"目前查看｜{item_name(selected_item_key)}",
+                f"**持有數量** ×{quantity}",
+                f"**用途／售價**｜{summary}",
+            )
+        )
     else:
-        lines += ["", "這個分類目前沒有物品。"]
+        sections.append(_town_life_section("目前查看", "這個分類目前沒有物品。"))
 
     if page_keys:
-        lines += ["", "**本頁物品**"]
+        page_lines = []
         for key in page_keys:
-            lines.append(f"{item_name(key)} ×{int(inventory.get(key, 0))}")
+            page_lines.append(f"**{item_name(key)}** ×{int(inventory.get(key, 0))}")
+        sections.append(_town_life_section("本頁物品", "\n".join(page_lines)))
 
-    description = "\n".join(lines)
-    if notice:
-        description = f"**本次結果**\n{notice}\n\n{description}"
+    description = _town_life_notice(notice) + "\n\n".join(sections)
     embed = monk_embed("河岸市集｜分類背包", description, color=0x8C744B)
     embed.set_footer(
         text="上一頁／下一頁會依序跨分類移動；詳細用途請按「詳細說明」。"
@@ -7491,26 +7531,30 @@ def mailbox_embed(
     snapshot = TOWN_LIFE_DB.get_snapshot(user_id)
     mailbox = snapshot["mailbox"]
     unclaimed = [mail for mail in mailbox if not str(mail["claimed_at"])]
-    lines = [
-        f"**待領信件**：{len(unclaimed)} 封",
-        "附件領取成功後會留存「已領取」紀錄，不會重複發放。",
-    ]
+    mail_lines: list[str] = []
     if mailbox:
         for mail in mailbox[:10]:
             claimed = bool(str(mail["claimed_at"]))
             state = "已領取" if claimed else "待領取"
-            lines += [
-                "",
+            mail_lines += [
                 f"**{mail['title']}｜{state}**",
                 str(mail["body"]),
-                f"附件：{item_name(str(mail['item_key']))}×{int(mail['quantity'])}",
+                f"**附件**｜{item_name(str(mail['item_key']))}×{int(mail['quantity'])}",
+                "",
             ]
     else:
-        lines += ["", "目前沒有信件。"]
+        mail_lines.append("目前沒有信件。")
 
-    description = "\n".join(lines)
-    if notice:
-        description = f"**本次結果**\n{notice}\n\n{description}"
+    description = _town_life_notice(notice) + "\n\n".join(
+        (
+            _town_life_section(
+                "信箱狀態",
+                f"**待領信件**：{len(unclaimed)} 封",
+                "*附件領取成功後會保留已領取紀錄，不會重複發放。*",
+            ),
+            _town_life_section("信件列表", "\n".join(mail_lines).rstrip()),
+        )
+    )
     embed = monk_embed("城下町｜信箱", description, color=0x4E78A0)
     display_item = item_key or (
         str(unclaimed[0]["item_key"]) if unclaimed else ""
