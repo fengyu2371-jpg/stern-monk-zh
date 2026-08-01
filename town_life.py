@@ -434,6 +434,7 @@ class TownLifeDatabase:
                     spirit INTEGER NOT NULL DEFAULT 100,
                     max_spirit INTEGER NOT NULL DEFAULT 100,
                     stamina_updated_at TEXT NOT NULL,
+                    daily_resource_reset_date TEXT NOT NULL DEFAULT '',
                     last_rest_date TEXT NOT NULL DEFAULT '',
                     food_stamina_date TEXT NOT NULL DEFAULT '',
                     food_stamina_recovered INTEGER NOT NULL DEFAULT 0,
@@ -531,11 +532,25 @@ class TownLifeDatabase:
                 conn.execute(
                     "ALTER TABLE town_life_players ADD COLUMN food_stamina_recovered INTEGER NOT NULL DEFAULT 0"
                 )
+            if "daily_resource_reset_date" not in player_columns:
+                conn.execute(
+                    "ALTER TABLE town_life_players ADD COLUMN daily_resource_reset_date TEXT NOT NULL DEFAULT ''"
+                )
+                # 沿用舊體力時間作為首次每日重置標記。若該時間仍停在
+                # 昨日，玩家下次操作時會立即取得今天的體力與精神力。
+                conn.execute(
+                    """
+                    UPDATE town_life_players
+                    SET daily_resource_reset_date = SUBSTR(stamina_updated_at, 1, 10)
+                    WHERE daily_resource_reset_date = ''
+                    """
+                )
 
             required_schema = {
                 "town_life_players": {
                     "user_id", "coins", "stamina", "max_stamina",
                     "spirit", "max_spirit", "stamina_updated_at",
+                    "daily_resource_reset_date",
                     "last_rest_date", "food_stamina_date",
                     "food_stamina_recovered", "created_at", "updated_at",
                 },
@@ -700,14 +715,17 @@ class TownLifeDatabase:
 
     def _ensure_player(self, conn: sqlite3.Connection, user_id: int) -> None:
         uid = str(user_id)
-        now = now_iso()
+        current_time = taipei_now()
+        now = current_time.isoformat(timespec="seconds")
+        today = current_time.date().isoformat()
         conn.execute(
             """
             INSERT OR IGNORE INTO town_life_players (
                 user_id, coins, stamina, max_stamina, spirit, max_spirit,
-                stamina_updated_at, last_rest_date, food_stamina_date,
+                stamina_updated_at, daily_resource_reset_date,
+                last_rest_date, food_stamina_date,
                 food_stamina_recovered, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, ?)
             """,
             (
                 uid,
@@ -717,10 +735,35 @@ class TownLifeDatabase:
                 INITIAL_SPIRIT,
                 MAX_SPIRIT,
                 now,
+                today,
                 now,
                 now,
             ),
         )
+        player = conn.execute(
+            """
+            SELECT daily_resource_reset_date
+            FROM town_life_players
+            WHERE user_id = ?
+            """,
+            (uid,),
+        ).fetchone()
+        if player is not None and str(player["daily_resource_reset_date"] or "") != today:
+            # 每日凌晨 00:00（Asia/Taipei）後的第一次讀取或操作，
+            # 將兩項資源恢復到玩家當下真正的上限，不寫死基礎數值。
+            conn.execute(
+                """
+                UPDATE town_life_players
+                SET stamina = max_stamina,
+                    spirit = max_spirit,
+                    stamina_updated_at = ?,
+                    daily_resource_reset_date = ?,
+                    last_rest_date = '',
+                    updated_at = ?
+                WHERE user_id = ?
+                """,
+                (now, today, now, uid),
+            )
         for tool_key in TOOL_CONFIG:
             conn.execute(
                 """
@@ -768,27 +811,12 @@ class TownLifeDatabase:
         if row is None:
             raise TownLifeError("找不到城下町生活資料。")
 
-        # 體力採離線結算：跨日先恢復至上限；同一天每完整一分鐘
-        # 恢復一點。到達上限時會丟棄多餘時間，避免滿體囤積恢復量。
+        # 每日資源回滿已由 _ensure_player 統一處理。體力另外採離線
+        # 結算：同一天每完整一分鐘恢復一點。到達上限時會丟棄
+        # 多餘時間，避免滿體囤積恢復量。
         current_time = taipei_now()
         updated_at = parse_time(str(row["stamina_updated_at"]))
-        if updated_at.date() < current_time.date():
-            maximum = int(row["max_stamina"])
-            now = current_time.isoformat(timespec="seconds")
-            conn.execute(
-                """
-                UPDATE town_life_players
-                SET stamina = ?, stamina_updated_at = ?,
-                    last_rest_date = '', updated_at = ?
-                WHERE user_id = ?
-                """,
-                (maximum, now, now, uid),
-            )
-            row = conn.execute(
-                "SELECT * FROM town_life_players WHERE user_id = ?",
-                (uid,),
-            ).fetchone()
-        elif updated_at <= current_time:
+        if updated_at <= current_time:
             elapsed_minutes = int(
                 (current_time - updated_at).total_seconds() // 60
             )

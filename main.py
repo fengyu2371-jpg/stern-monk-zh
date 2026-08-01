@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# stern-monk-zh-tw v29.2 town-life workshops and spirit
+# stern-monk-zh-tw v30 Taipei daily stamina and spirit reset
 # 主要程式碼集中於本檔；data/ 僅保存修士 Bot 台詞資料。
 
 
@@ -2100,7 +2100,7 @@ class SafeModal(discord.ui.Modal):
 
 PLAYER_PANEL_TIMEOUT_SECONDS = 300
 PLAYER_PANEL_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
-BUILD_VERSION = "2026-08-01-protected-sale-confirm-v29"
+BUILD_VERSION = "2026-08-01-taipei-daily-resource-reset-v30"
 
 
 def locked_operation_embed(
