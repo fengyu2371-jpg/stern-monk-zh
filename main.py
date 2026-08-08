@@ -2021,6 +2021,157 @@ ORACLE_USAGE_SCOPE = "oracle_week"
 OUTFIT_USAGE_SCOPE = "outfit_day"
 
 
+ACCOUNT_TRANSFER_SKIP_TABLES = {"player_panels"}
+
+
+def _quote_sqlite_identifier(name: str) -> str:
+    """Quote an SQLite identifier discovered from sqlite_master."""
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _account_transfer_tables(conn: sqlite3.Connection) -> list[str]:
+    """Return every application table whose player owner column is user_id."""
+    tables: list[str] = []
+    rows = conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name NOT LIKE 'sqlite_%'
+        ORDER BY name
+        """
+    ).fetchall()
+    for row in rows:
+        table_name = str(row[0])
+        if table_name in ACCOUNT_TRANSFER_SKIP_TABLES:
+            continue
+        quoted = _quote_sqlite_identifier(table_name)
+        columns = {
+            str(column[1])
+            for column in conn.execute(f"PRAGMA table_info({quoted})").fetchall()
+        }
+        if "user_id" in columns:
+            tables.append(table_name)
+    return tables
+
+
+def get_account_transfer_summary(user_id: int) -> dict[str, int]:
+    uid = str(int(user_id))
+    with closing(sqlite3.connect(str(Path(SETTINGS.monk_db_path)))) as conn:
+        tables = _account_transfer_tables(conn)
+        result: dict[str, int] = {}
+        for table_name in tables:
+            quoted = _quote_sqlite_identifier(table_name)
+            count = int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM {quoted} WHERE user_id = ?",
+                    (uid,),
+                ).fetchone()[0]
+            )
+            if count:
+                result[table_name] = count
+        return result
+
+
+def transfer_player_account_data(old_user_id: int, new_user_id: int) -> dict[str, int]:
+    """Move every user_id-owned row to a new Discord account atomically.
+
+    Any automatically-created data already owned by the destination account is
+    removed first. player_panels is intentionally discarded because those rows
+    point to Discord messages created for the old account and must not be reused.
+    """
+    old_uid = str(int(old_user_id))
+    new_uid = str(int(new_user_id))
+    if old_uid == new_uid:
+        raise ValueError("來源帳號與目標帳號不可相同。")
+
+    database_path = Path(SETTINGS.monk_db_path)
+    with closing(sqlite3.connect(str(database_path), timeout=30)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 30000;")
+        conn.execute("PRAGMA foreign_keys = OFF;")
+        tables = _account_transfer_tables(conn)
+
+        source_counts: dict[str, int] = {}
+        for table_name in tables:
+            quoted = _quote_sqlite_identifier(table_name)
+            count = int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM {quoted} WHERE user_id = ?",
+                    (old_uid,),
+                ).fetchone()[0]
+            )
+            if count:
+                source_counts[table_name] = count
+        if not source_counts:
+            raise ValueError("來源帳號找不到任何可轉移的玩家資料。")
+
+        try:
+            conn.execute("BEGIN IMMEDIATE;")
+            # 新帳號可能因為剛加入或開過面板而已有預設資料。
+            # 這裡採「舊帳號完整覆蓋新帳號」策略，避免複合主鍵衝突。
+            for table_name in tables:
+                quoted = _quote_sqlite_identifier(table_name)
+                conn.execute(
+                    f"DELETE FROM {quoted} WHERE user_id = ?",
+                    (new_uid,),
+                )
+
+            moved_counts: dict[str, int] = {}
+            for table_name in tables:
+                quoted = _quote_sqlite_identifier(table_name)
+                cursor = conn.execute(
+                    f"UPDATE {quoted} SET user_id = ? WHERE user_id = ?",
+                    (new_uid, old_uid),
+                )
+                if cursor.rowcount > 0:
+                    moved_counts[table_name] = int(cursor.rowcount)
+
+            # 面板訊息與帳號綁定，不應轉移；兩邊舊紀錄全部清掉。
+            conn.execute(
+                "DELETE FROM player_panels WHERE user_id IN (?, ?)",
+                (old_uid, new_uid),
+            )
+
+            fk_errors = conn.execute("PRAGMA foreign_key_check;").fetchall()
+            if fk_errors:
+                raise sqlite3.IntegrityError(
+                    f"帳號轉移後外鍵檢查失敗，共 {len(fk_errors)} 筆。"
+                )
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS account_transfer_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    old_user_id TEXT NOT NULL,
+                    new_user_id TEXT NOT NULL,
+                    transferred_at TEXT NOT NULL,
+                    moved_rows INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO account_transfer_log (
+                    old_user_id, new_user_id, transferred_at, moved_rows
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    old_uid,
+                    new_uid,
+                    datetime.now(TAIPEI_TIMEZONE).isoformat(timespec="seconds"),
+                    sum(moved_counts.values()),
+                ),
+            )
+            conn.commit()
+            return moved_counts
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON;")
+
+
 def monk_embed(
     title: str,
     description: str,
@@ -10513,6 +10664,210 @@ async def outfit_command(
         view=view,
     )
     view.message = await interaction.original_response()
+
+
+class AccountTransferConfirmView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        admin_id: int,
+        old_user_id: int,
+        new_member: discord.Member,
+    ) -> None:
+        super().__init__(timeout=90)
+        self.admin_id = int(admin_id)
+        self.old_user_id = int(old_user_id)
+        self.new_member = new_member
+        self.finished = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.admin_id:
+            await interaction.response.send_message(
+                "只有開啟這次轉移操作的管理員可以確認。",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(
+        label="確認轉移",
+        style=discord.ButtonStyle.danger,
+    )
+    async def confirm_transfer(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if self.finished:
+            await interaction.response.send_message(
+                "這次轉移操作已經結束。",
+                ephemeral=True,
+            )
+            return
+
+        self.finished = True
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        try:
+            moved = transfer_player_account_data(
+                self.old_user_id,
+                self.new_member.id,
+            )
+        except (ValueError, sqlite3.Error, OSError) as exc:
+            logger.exception(
+                "玩家帳號資料轉移失敗：old_user_id=%s new_user_id=%s",
+                self.old_user_id,
+                self.new_member.id,
+            )
+            await interaction.followup.send(
+                f"❌ 轉移失敗：{exc}\n資料庫交易已回滾，原資料不會半套搬走。",
+                ephemeral=True,
+            )
+            self.stop()
+            return
+
+        # 舊、新帳號若仍有記憶體中的操作面板，直接失效，避免使用舊快照。
+        for uid in (self.old_user_id, self.new_member.id):
+            session = ACTIVE_PLAYER_PANELS.get(uid)
+            if session is not None:
+                session.expired = True
+                clear_player_panel_session(session)
+
+        moved_rows = sum(moved.values())
+        table_lines = "\n".join(
+            f"• `{name}`：{count} 筆"
+            for name, count in sorted(moved.items())
+        )
+        await interaction.followup.send(
+            "✅ **玩家帳號資料轉移完成**\n\n"
+            f"舊帳號：<@{self.old_user_id}> (`{self.old_user_id}`)\n"
+            f"新帳號：{self.new_member.mention} (`{self.new_member.id}`)\n"
+            f"共轉移：**{moved_rows} 筆資料**\n\n"
+            f"{table_lines}\n\n"
+            "新帳號請重新輸入 `/學生資料` 或 `/城下町` 開啟面板。",
+            ephemeral=True,
+        )
+        logger.warning(
+            "管理員完成玩家帳號資料轉移：admin_id=%s old_user_id=%s "
+            "new_user_id=%s moved_rows=%s",
+            self.admin_id,
+            self.old_user_id,
+            self.new_member.id,
+            moved_rows,
+        )
+        self.stop()
+
+    @discord.ui.button(
+        label="取消",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def cancel_transfer(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        self.finished = True
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(
+            content="已取消帳號資料轉移，資料庫沒有變更。",
+            view=self,
+        )
+        self.stop()
+
+
+@tree.command(
+    name="轉移玩家資料",
+    description="管理員將舊 Discord 帳號的完整玩家資料轉移到新帳號",
+)
+@app_commands.describe(
+    舊帳號id="舊 Discord 帳號的使用者 ID（即使已離開伺服器也可使用）",
+    新帳號="要接收資料的新 Discord 帳號",
+)
+@app_commands.default_permissions(manage_guild=True)
+async def transfer_player_data_command(
+    interaction: discord.Interaction,
+    舊帳號id: str,
+    新帳號: discord.Member,
+) -> None:
+    member = interaction.user
+    if (
+        not isinstance(member, discord.Member)
+        or not member.guild_permissions.manage_guild
+    ):
+        await interaction.response.send_message(
+            "這個指令只提供給擁有「管理伺服器」權限的管理員。",
+            ephemeral=True,
+        )
+        return
+
+    raw_old_id = 舊帳號id.strip()
+    if not raw_old_id.isdigit():
+        await interaction.response.send_message(
+            "舊帳號 ID 必須是純數字 Discord User ID。",
+            ephemeral=True,
+        )
+        return
+
+    old_user_id = int(raw_old_id)
+    if old_user_id == 新帳號.id:
+        await interaction.response.send_message(
+            "舊帳號與新帳號不能是同一個帳號。",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        source = get_account_transfer_summary(old_user_id)
+        target = get_account_transfer_summary(新帳號.id)
+    except (sqlite3.Error, OSError):
+        logger.exception("讀取帳號轉移預覽失敗")
+        await interaction.response.send_message(
+            "目前無法讀取玩家資料，請查看 Railway 紀錄。",
+            ephemeral=True,
+        )
+        return
+
+    if not source:
+        await interaction.response.send_message(
+            "找不到這個舊帳號的玩家資料，請先確認 Discord User ID 是否正確。",
+            ephemeral=True,
+        )
+        return
+
+    source_rows = sum(source.values())
+    target_rows = sum(target.values())
+    source_tables = len(source)
+    target_note = (
+        f"新帳號目前已有 **{target_rows} 筆 / {len(target)} 個資料表** 的資料。"
+        "\n⚠️ 確認後會先清除新帳號這些既有遊戲資料，再由舊帳號完整覆蓋。"
+        if target_rows
+        else "新帳號目前沒有需要覆蓋的玩家資料。"
+    )
+
+    content = (
+        "## ⚠️ 玩家帳號資料轉移預覽\n"
+        f"**舊帳號**：<@{old_user_id}> (`{old_user_id}`)\n"
+        f"**新帳號**：{新帳號.mention} (`{新帳號.id}`)\n\n"
+        f"舊帳號找到 **{source_rows} 筆 / {source_tables} 個資料表** 的玩家資料。\n"
+        f"{target_note}\n\n"
+        "會轉移所有以 `user_id` 綁定的學籍、神諭使用紀錄、城下町玩家資料、"
+        "工具、職業、背包、農田、動物、信箱等資料。\n"
+        "舊的操作面板不會搬移，完成後新帳號需重新開啟面板。\n\n"
+        "**這是搬家，不是複製。完成後舊帳號將不再持有這些玩家資料。**"
+    )
+    view = AccountTransferConfirmView(
+        admin_id=interaction.user.id,
+        old_user_id=old_user_id,
+        new_member=新帳號,
+    )
+    await interaction.response.send_message(
+        content,
+        view=view,
+        ephemeral=True,
+    )
 
 
 @tree.command(
